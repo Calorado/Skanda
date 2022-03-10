@@ -702,17 +702,14 @@ namespace skanda {
 
 		HashTable<Pointer, FastIntHash> nodeLookup;
 		HashTable<Pointer, FastIntHash> lzdict3;
-		HashTable<Pointer, FastIntHash> lzdict2;
 		LzCacheTable<Pointer, FastIntHash> lzdict12;
-
-		bool useHash2;
 
 		~BinaryMatchFinder() {
 			delete[] nodes;
 		}
 		BinaryMatchFinder() {}
 
-		void init(const size_t size, const CompressorOptions compressorOptions, const bool _useHash2) {
+		void init(const size_t size, const CompressorOptions compressorOptions) {
 
 			const size_t binaryTreeSize = (size_t)1 << compressorOptions.maxHashTableSize;
 
@@ -725,35 +722,12 @@ namespace skanda {
 			lzdict3.init(std::min(int_log2(size) - 3, (size_t)16));
 			if (size >= binaryTreeSize)
 				lzdict12.init(std::max(4, (int)int_log2(size - binaryTreeSize) - 4), compressorOptions.maxElementsPerHash - 4);
-
-			if (_useHash2)
-				lzdict2.init(std::min(int_log2(size) - 3, (size_t)12));
-			useHash2 = _useHash2;
 		}
 
 		LZ_Match<Pointer>* find_matches_and_update(const uint8_t* const input, const uint8_t* const inputStart, const uint8_t* const limit,
 			LZ_Match<Pointer>* matches, size_t highestLength, const CompressorOptions compressorOptions) {
 
 			const size_t inputPosition = input - inputStart;
-
-			if (useHash2) {
-				Pointer& chain2 = lzdict2[readHash2(input)];
-				const uint8_t* where = inputStart + chain2;
-				size_t length = test_match(input, where, limit, 2);
-
-				if (length > highestLength) {
-					matches->distance = input - where;
-					matches->length = length;
-					highestLength = length;
-					matches++;
-
-					if (highestLength >= compressorOptions.standardNiceLength) {
-						update_position(input, inputStart, limit, compressorOptions);
-						return matches;
-					}
-				}
-				chain2 = inputPosition;
-			}
 
 			// First try to get a length 3 match
 			Pointer& chain3 = lzdict3[readHash3(input)];
@@ -773,12 +747,6 @@ namespace skanda {
 			}
 			chain3 = inputPosition;
 
-			// Look up first match for current position
-			//
-			// backPosition is the current root of the tree of strings with this
-			// hash. We are going to re-root the tree so inputPosition becomes the
-			// new root.
-			//
 			//If we reach this position on the back stop the search
 			const size_t btEnd = inputPosition < nodeListSize ? 0 : inputPosition - nodeListSize;
 
@@ -795,34 +763,16 @@ namespace skanda {
 
 			// Check matches
 			while (true) {
-				// If at bottom of tree, mark leaf nodes
-				//
-				// In case we reached max_depth, this also prunes the
-				// subtree we have not searched yet and do not know
-				// where belongs.
-				//
+				
 				if (backPosition <= btEnd || depth-- == 0) {
 					*lesserNode = NO_MATCH_POS;
 					*greaterNode = NO_MATCH_POS;
 					break;
 				}
 
-				// The string at backPosition is lexicographically greater than
-				// a string that matched in the first lesserLength positions,
-				// and less than a string that matched in the first
-				// greaterLength positions, so it must match up to at least
-				// the minimum of these.
 				const uint8_t* front = std::min(lesserFront, greaterFront);
 				const uint8_t* back = front - (inputPosition - backPosition);
 
-				// Extend current match if possible
-				//
-				// Note that we are checking matches in order from the
-				// closest and back. This means for a match further
-				// away, the encoding of all lengths up to the current
-				// max length will always be longer or equal, so we need
-				// only consider the extension.
-				//
 				const size_t extraLength = test_match(front, back, limit, 0);
 				front += extraLength;
 				back += extraLength;
@@ -834,13 +784,6 @@ namespace skanda {
 					matches->length = length;
 					matches++;
 
-					// If we reach maximum match length, the string at backPosition
-					// is equal to inputPosition, so we can assign the left and right
-					// subtrees.
-					//
-					// This removes backPosition from the tree, but we added inputPosition
-					// which is equal and closer for future matches.
-					//
 					if (length >= compressorOptions.standardNiceLength) {
 						*lesserNode = nextNode[0];
 						*greaterNode = nextNode[1];
@@ -851,21 +794,6 @@ namespace skanda {
 					highestLength = length;
 				}
 
-				// Go to previous match and restructure tree
-				//
-				// lesserNode points to a node that is going to contain
-				// elements lexicographically less than inputPosition (the search
-				// string).
-				//
-				// If the string at backPosition is less than inputPosition, we set that
-				// lesserNode to backPosition. We know that all elements in the
-				// left subtree are less than backPosition, and thus less than
-				// inputPosition, so we point lesserNode at the right subtree of
-				// backPosition and continue our search there.
-				//
-				// The equivalent applies to greaterNode when the string at
-				// backPosition is greater than inputPosition.
-				//
 				if (*back < *front) {
 					*lesserNode = backPosition;
 					lesserNode = &nextNode[1];
@@ -914,8 +842,6 @@ namespace skanda {
 			const CompressorOptions& compressorOptions) {
 
 			const size_t inputPosition = input - inputStart;
-			if (useHash2)
-				lzdict2[readHash2(input)] = inputPosition;
 			lzdict3[readHash3(input)] = inputPosition;
 			if (inputPosition >= nodeListSize)
 				lzdict12[readHash12(input - nodeListSize)].push(inputPosition - nodeListSize);
@@ -972,10 +898,6 @@ namespace skanda {
 			}
 		}
 	};
-
-	// * / * // * / * // * / * // * / * // * / * // * / * //
-	//                      SKANDA                        //
-	// * / * // * / * // * / * // * / * // * / * // * / * //
 
 	//How many bytes to process before reporting progress or checking for abort flag
 	const int SKANDA_PROGRESS_REPORT_PERIOD = 512 * 1024;
@@ -1901,7 +1823,7 @@ namespace skanda {
 					hashMatchFinder.init(size, compressorOptions);
 				}
 				else {
-					binaryMatchFinder.init(size, compressorOptions, false);
+					binaryMatchFinder.init(size, compressorOptions);
 				}
 				parser = new SkandaOptimalParserState<Pointer>[(compressorOptions.optimalBlockSize + 1) * compressorOptions.maxArrivals];
 				stream = new LZ_Structure<Pointer>[compressorOptions.optimalBlockSize];
