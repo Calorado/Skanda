@@ -11,7 +11,7 @@ Simply add the file Skanda.h to your project and create a .cpp file with the fol
 ```
 Then simply add the header file anywhere you need.
 
-The API is very simple and straighforward. To compress you might do something like this:
+The API is very simple and straightforward. To compress you might do something like this:
 ```cpp
 uint8_t* outputBuf = new uint8_t[skanda::skanda_compress_bound(inputSize)];
 size_t compressedSize = skanda::skanda_compress(inputBuf, inputSize, outputBuf, level);
