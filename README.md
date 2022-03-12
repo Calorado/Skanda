@@ -1,6 +1,6 @@
 # Skanda
 
-Skanda is an LZ4-like compression algorithm, intended for higher compression ratios (similar to DEFLATE) while still keeping a very high decompression speed. This puts it somewhere in between LZ4 and Zstd in the size/speed tradeoff.
+Skanda is a compression algorithm based on LZ4 and Lizard, but designed for higher ratios, more similar to DEFLATE, while still keeping >1GB/s of decompression speed. This puts it somewhere between LZ4 and Zstd in the size/speed tradeoff, and makes it one of the strongest entropyless, byte-aligned LZs out there.
 
 # How to use
 
