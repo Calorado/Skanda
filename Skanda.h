@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm
+ * Skanda Compression Algorithm v1.0.2
  * Copyright (c) 2022 Calorado
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -12,6 +12,7 @@
 #define __SKANDA__
 
 #include <cstdint>
+#include <stdio.h> //size_t
 
 namespace skanda {
 	//Base class that allows to track progress of compression and decompression of
@@ -51,7 +52,6 @@ namespace skanda {
 
 #include <algorithm>
 #include <cstring>
-#include <cmath>
 
 using namespace std;
 
@@ -63,6 +63,15 @@ namespace skanda {
 #define FORCE_INLINE inline __attribute__((always_inline))
 #else
 #define FORCE_INLINE inline
+#endif
+
+#if (defined(__GNUC__) && (__GNUC__ >= 3)) || (defined(__INTEL_COMPILER) && (__INTEL_COMPILER >= 800)) || defined(__clang__)
+#define expect(expr,value)    (__builtin_expect ((expr),(value)) )
+#define likely(expr)     expect((expr) != 0, 1)
+#define unlikely(expr)   expect((expr) != 0, 0)
+#else
+#define likely(expr)     (expr)
+#define unlikely(expr)   (expr)
 #endif
 
 #if defined(_MSC_VER)
@@ -89,19 +98,14 @@ namespace skanda {
 
 #if IS_64BIT
 
-	//Way faster than using log2(double), also returns 0 for a value of 0
-	FORCE_INLINE uint64_t int_log2(const uint64_t value) {
+	//Undefined behaviour if value == 0
+	FORCE_INLINE uint64_t unsafe_int_log2(const uint64_t value) {
 #if defined(_MSC_VER)
-		if (value) {
-			unsigned long result;
-			_BitScanReverse64(&result, value);
-			return result;
-		}
-		return 0;
+		unsigned long result;
+		_BitScanReverse64(&result, value);
+		return result;
 #elif defined(__GNUC__)
-		if (value)
-			return 63 - __builtin_clzll(value);
-		return 0;
+		return 63 - __builtin_clzll(value);
 #else
 		const uint8_t tab64[64] = {
 			 0, 58,  1, 59, 47, 53,  2, 60,
@@ -125,19 +129,24 @@ namespace skanda {
 #endif
 	}
 
-	//Returns the index of the first set bit, starting from the least significant, or 0 if the input is null
-	FORCE_INLINE uint64_t bitScanForward(const uint64_t value) {
+	//Way faster than using log2(double), also returns 0 for a value of 0
+	FORCE_INLINE uint64_t int_log2(const uint64_t value) {
+#if defined(_MSC_VER) || defined(__GNUC__)
+		if (likely(value != 0))
+			return unsafe_int_log2(value);
+		return 0;
+#endif  //Fallback already returns 0 when value == 0
+		return unsafe_int_log2(value);
+	}
+
+	//Undefined behaviour when value == 0
+	FORCE_INLINE uint64_t unsafeBitScanForward(const uint64_t value) {
 #if defined(_MSC_VER)
-		if (value) {
-			unsigned long result;
-			_BitScanForward64(&result, value);
-			return result;
-		}
-		return 0;
+		unsigned long result;
+		_BitScanForward64(&result, value);
+		return result;
 #elif defined(__GNUC__)
-		if (value)
-			return __builtin_ctzll(value);
-		return 0;
+		return __builtin_ctzll(value);
 #else
 		const unsigned int tab64[64] = {
 			 0,  1,  2, 53,  3,  7, 54, 27,
@@ -151,6 +160,16 @@ namespace skanda {
 		};
 		return tab64[(value & (0 - value)) * 0x022FDD63CC95386D >> 58];
 #endif
+	}
+
+	//Returns the index of the first set bit, starting from the least significant, or 0 if the input is null
+	FORCE_INLINE uint64_t bitScanForward(const uint64_t value) {
+#if defined(_MSC_VER) || defined(__GNUC__)
+		if (likely(value != 0))
+			return unsafeBitScanForward(value);
+		return 0;
+#endif  //Fallback already returns 0 when value == 0
+		return unsafeBitScanForward(value);
 	}
 
 	struct FastIntHash {
@@ -198,18 +217,13 @@ namespace skanda {
 
 #else
 
-	FORCE_INLINE uint32_t int_log2(uint32_t value) {
+	FORCE_INLINE uint32_t unsafe_int_log2(uint32_t value) {
 #if defined(_MSC_VER)
-		if (value) {
-			unsigned long result;
-			_BitScanReverse(&result, value);
-			return result;
-		}
-		return 0;
+		unsigned long result;
+		_BitScanReverse(&result, value);
+		return result;
 #elif defined(__GNUC__)
-		if (value)
-			return 31 - __builtin_clz(value);
-		return 0;
+		return 31 - __builtin_clz(value);
 #else
 		const uint8_t tab32[32] = {
 			 0,  9,  1, 10, 13, 21,  2, 29,
@@ -227,18 +241,22 @@ namespace skanda {
 #endif
 	}
 
-	FORCE_INLINE uint32_t bitScanForward(uint32_t value) {
+	FORCE_INLINE uint32_t int_log2(uint32_t value) {
+#if defined(_MSC_VER) || defined(__GNUC__)
+		if (likely(value != 0))
+			return unsafe_int_log2(value);
+		return 0;
+#endif
+		return unsafe_int_log2(value);
+	}
+
+	FORCE_INLINE uint32_t unsafeBitScanForward(uint32_t value) {
 #if defined(_MSC_VER)
-		if (value) {
-			unsigned long result;
-			_BitScanForward(&result, value);
-			return result;
-		}
-		return 0;
+		unsigned long result;
+		_BitScanForward(&result, value);
+		return result;
 #elif defined(__GNUC__)
-		if (value)
-			return __builtin_ctz(value);
-		return 0;
+		return __builtin_ctz(value);
 #else
 		static uint8_t tab32[32] = {
 			 0,  1, 28,  2, 29, 14, 24,  3,
@@ -248,6 +266,15 @@ namespace skanda {
 		};
 		return tab32[(value & (0 - value)) * 0x077CB531U >> 27];
 #endif
+	}
+
+	FORCE_INLINE uint32_t bitScanForward(uint32_t value) {
+#if defined(_MSC_VER) || defined(__GNUC__)
+		if (likely(value != 0))
+			return unsafeBitScanForward(value);
+		return 0;
+#endif
+		return unsafeBitScanForward(value);
 	}
 
 	struct FastIntHash {
@@ -397,7 +424,7 @@ namespace skanda {
 				const uint64_t xorVal = readUint64LE(front) ^ readUint64LE(back);
 
 				if (xorVal) {
-					back += bitScanForward(xorVal) >> 3;
+					back += unsafeBitScanForward(xorVal) >> 3;
 					return back - matchOrigin;
 				}
 
@@ -416,60 +443,6 @@ namespace skanda {
 		}
 	}
 
-	//Note that this function will write beyond the end of the match. It is important to keep
-	//a buffer of at least 32 bytes after the end of match. But it is much faster than a memcpy()
-	FORCE_INLINE void copy_match(uint8_t*& dst, const size_t offset, const size_t length) {
-
-		uint8_t* const end = dst + length;
-		const uint8_t* src = dst - offset;
-
-		//If the offset is big enough we can perform a faster copy
-		if (offset >= 16) {
-			//Should be translated to some sse/neon or whatever-that-loads-stores-16-bytes instructions
-			memcpy(dst, src, 16);
-			memcpy(dst + 16, src + 16, 16);
-			memcpy(dst + 32, src + 32, 16);
-			if (length > 48) {
-				src += 48;
-				dst += 48;
-				do {
-					memcpy(dst, src, 16);
-					memcpy(dst + 16, src + 16, 16);
-					src += 32;
-					dst += 32;
-				} while (dst < end);
-			}
-		}
-		//Else it is a run-length type match
-		else {
-			//Change the offset to at least 2, so that we can copy 2 bytes at a time
-			*dst = *src;
-			src += offset > 1;
-
-			//Now the offset is at least 4
-			memcpy(dst + 1, src, 2);
-			src += ((offset >= 4) << 1) - (offset == 3);
-
-			memcpy(dst + 3, src, 4);
-			memcpy(dst + 7, src + 4, 4);
-			memcpy(dst + 11, src + 8, 4);
-			memcpy(dst + 15, src + 12, 4);
-			memcpy(dst + 19, src + 16, 4);
-			if (length > 23) {
-				dst += 23;
-				src += 20;
-				do {
-					memcpy(dst, src, 4);
-					memcpy(dst + 4, src + 4, 4);
-					dst += 8;
-					src += 8;
-				} while (dst < end);
-			}
-		}
-
-		dst = end;
-	}
-
 	const int GREEDY_FAST = 0;
 	const int GREEDY_NORMAL = 1;
 	const int LAZY_NORMAL = 2;
@@ -484,8 +457,8 @@ namespace skanda {
 		size_t maxElementsPerHash;
 		size_t standardNiceLength;
 		size_t repNiceLength;
-		size_t maxArrivals;             // (Optimal)
 		size_t optimalBlockSize;        // (Optimal)
+		size_t maxArrivals;             // (Optimal)
 	};
 
 	template<class Pointer>
@@ -918,19 +891,27 @@ namespace skanda {
 	FORCE_INLINE void copy_literal_run(const uint8_t* src, uint8_t*& dst, const size_t length) {
 
 		uint8_t* const end = dst + length;
-		do {
-			memcpy(dst, src, 16);
-			memcpy(dst + 16, src + 16, 16);
+		memcpy(dst, src, 16);
+		memcpy(dst + 16, src + 16, 16);
+		if (length > 32) {
 			src += 32;
 			dst += 32;
-		} while (dst < end);
+			do {
+				memcpy(dst, src, 16);
+				memcpy(dst + 16, src + 16, 16);
+				src += 32;
+				dst += 32;
+			} while (dst < end);
+		}
+
 		dst = end;
 	}
 
-	FORCE_INLINE void encode_prefixVarInt(uint8_t*& output, size_t& var) {
+	FORCE_INLINE void encode_prefixVarInt(uint8_t*& output, size_t& var, const bool nonZero) {
 
+		size_t index = (nonZero ? unsafe_int_log2(var) : int_log2(var)) / 7;
 		if (IS_64BIT && IS_LITTLE_ENDIAN) {
-			const size_t index = int_log2(var) / 7;
+
 			if (index >= 8) {
 				size_t base = var << (index + 1);
 				base |= (size_t)1 << index;
@@ -949,7 +930,6 @@ namespace skanda {
 			}
 		}
 		else {
-			size_t index = int_log2(var) / 7;
 			while (index >= 8) {
 				*output++ = 0;
 				index -= 8;
@@ -969,54 +949,10 @@ namespace skanda {
 		if (var >= 255) {
 			*output++ = 255;
 			var -= 255;
-			encode_prefixVarInt(output, var);
+			encode_prefixVarInt(output, var, 0);
 		}
 		else
 			*output++ = var;
-	}
-
-	//For 64bit this wont read more than 10 bytes
-	FORCE_INLINE size_t decode_prefixVarInt(const uint8_t*& compressed) {
-
-		size_t result;
-		if (IS_64BIT && IS_LITTLE_ENDIAN) {
-			//Just take 8 bytes, and check the position of the first 1, that will tell how many bytes the distance occupies
-			result = readUint64LE(compressed);
-			size_t index = bitScanForward(result);
-			//We will need additional bytes
-			if (index >= 8) {
-				compressed += 8;
-				result >>= index + 1;
-				const size_t extra = readUint16LE(compressed) & (index == 9 ? 0xFFFF : 0xFF);
-				compressed += 1 + (index == 9);
-				result |= extra << 63 - index;
-			}
-			else {
-				//Throw away those leading 0 and the 1, and advance the compressed data stream
-				result &= UINT64_MAX >> (7 - index) * 8;
-				index++;
-				result >>= index;
-				compressed += index;
-			}
-		}
-		else {
-			result = *compressed++;
-			bool bit = result & 1;
-			result >>= 1;
-			for (size_t i = 1; !bit && i <= 9; i++) {
-				bit = result & 1;
-				result >>= 1;
-				result |= (size_t)(*compressed++) << (i * 7) - 1;
-			}
-		}
-		return result;
-	}
-
-	FORCE_INLINE size_t decode_length(const uint8_t*& compressed) {
-		size_t length = *compressed++;
-		if (length == 255)
-			length += decode_prefixVarInt(compressed);
-		return length;
 	}
 
 	const int SKANDA_NORMAL_MIN_MATCH_LENGTH = 3;
@@ -1061,7 +997,7 @@ namespace skanda {
 			matchLength -= SKANDA_NORMAL_MIN_MATCH_LENGTH;
 			repOffset = distance;
 
-			encode_prefixVarInt(output, distance);
+			encode_prefixVarInt(output, distance, 1);
 
 			const size_t lengthOverflow = (*controlByte) ? 15 : 31;
 			if (matchLength >= lengthOverflow) {
@@ -1189,7 +1125,7 @@ namespace skanda {
 				length = test_match(input, where, limit, 6);
 
 				size_t distance = input - where;
-				matchCost = 2 + testedPositions + int_log2(distance) / 7;
+				matchCost = 2 + testedPositions + unsafe_int_log2(distance) / 7;
 				if (length + bestMatchCost > matchCost + bestLength) {
 					bestDistance = distance;
 					bestLength = length;
@@ -1221,7 +1157,7 @@ namespace skanda {
 					size_t length = test_match(input, where, limit, 4);
 
 					size_t distance = input - where;
-					matchCost = 2 + testedPositions + int_log2(distance) / 7;
+					matchCost = 2 + testedPositions + unsafe_int_log2(distance) / 7;
 					if (length + bestMatchCost > matchCost + bestLength) {
 						bestDistance = distance;
 						bestLength = length;
@@ -1261,7 +1197,7 @@ namespace skanda {
 		uint32_t cost;
 		//Serves as both match distance and rep offset.
 		Pointer distance;
-		//Literal run length in a certain state can be unbounded, while 
+		//Literal run length in a certain state can be unbounded, while
 		// match length is limited by "nice length"
 		Pointer literalRunLength;
 		uint16_t matchLength;
@@ -1339,13 +1275,14 @@ namespace skanda {
 					break;
 				}
 
+				const size_t lengthOverflow = parserPosition->literalRunLength ? 17 : 33;
 				for (const LZ_Match<Pointer>* matchIt = matches; matchIt != matchesEnd; matchIt++) {
 
 					if (matchIt->distance == parserPosition->distance)
 						continue;
 
 					size_t matchCost = parserPosition->cost;
-					matchCost += (2 + int_log2(matchIt->distance) / 7 + (matchIt->length > 33)) << 16; //size cost
+					matchCost += (2 + unsafe_int_log2(matchIt->distance) / 7 + (matchIt->length > lengthOverflow)) << 16; //size cost
 					matchCost += 1 + (matchIt->distance > (1 << 20)); //speed cost
 
 					nextPosition = parserPosition + matchIt->length;
@@ -1450,7 +1387,7 @@ namespace skanda {
 
 				if (currentArrival->literalRunLength > 0) {
 					size_t repMatchLength = test_match(inputPosition, inputPosition - currentArrival->distance, limit, 2);
-					//Since we go from lowest cost arrival to highest, it makes sense that the rep match 
+					//Since we go from lowest cost arrival to highest, it makes sense that the rep match
 					// should be at least as long as the best found so far
 					if (repMatchLength >= acceptableRepMatchLength) {
 						if (position + repMatchLength >= blockLength || repMatchLength >= compressorOptions.repNiceLength) {
@@ -1461,7 +1398,7 @@ namespace skanda {
 						}
 
 						acceptableRepMatchLength = repMatchLength;
-						//Small heuristic: instead of testing all positions, only test the maximum match length, 
+						//Small heuristic: instead of testing all positions, only test the maximum match length,
 						// and if it overflows, just before the overflow
 						//There is a notable speed increase for a negligible size penalty
 						size_t repMatchCost = currentArrival->cost;
@@ -1529,6 +1466,7 @@ namespace skanda {
 				}
 
 				size_t length = 0;
+				const size_t lengthOverflow = parserPosition->literalRunLength ? 17 : 33;
 
 				for (LZ_Match<Pointer>* matchIt = matches; matchIt != matchesEnd; matchIt++) {
 
@@ -1536,20 +1474,18 @@ namespace skanda {
 						continue;
 
 					size_t matchCost = parserPosition->cost;
-					matchCost += (2 + int_log2(matchIt->distance) / 7) << 16;  //size cost
-					matchCost += 1 + (matchIt->distance > (1 << 20));  //speed cost
+					matchCost += (2 + unsafe_int_log2(matchIt->distance) / 7) << 16;  //size cost
+					matchCost += 1 + (matchIt->distance > (1 << 20)) * 2;  //speed cost
 
 					do {
-						//If the current match has a length over 17 (it overflows length coding), and we have not
-						//tried a match length 17 in any match before, try it.
-						if (length < 33 && matchIt->length > 33)
-							length = 33;
+						//If the current match has a length that overflows, and we have not tried any
+						// length just below that overflow, try it
+						if (length < lengthOverflow && matchIt->length > lengthOverflow)
+							length = lengthOverflow;
 						else
 							length = matchIt->length;
 
-						//Remember we can check the same match with 2 different lengths, and most of
-						// the cost calculations only need to be done once
-						matchCost += (length > 33) << 16;
+						matchCost += (length > lengthOverflow) << 16;
 
 						SkandaOptimalParserState<Pointer>* arrivalIt = parserPosition + length * compressorOptions.maxArrivals;
 						SkandaOptimalParserState<Pointer>* const lastArrival = arrivalIt + compressorOptions.maxArrivals;
@@ -1689,9 +1625,16 @@ namespace skanda {
 						}
 						else {
 							const uint8_t* const matchEnd = input + matchLength;
-							*dictEntry = pos;
-							for (input++; input != matchEnd; input++)
-								lzdict[readHash5(input)] = input - inputStart;
+							if (distance < matchLength) {
+								input = matchEnd - distance;
+								for (; input != matchEnd; input++)
+									lzdict[readHash5(input)] = input - inputStart;
+							}
+							else {
+								*dictEntry = pos;
+								for (input++; input != matchEnd; input++)
+									lzdict[readHash5(input)] = input - inputStart;
+							}
 						}
 
 						literalRunStart = input;
@@ -1871,17 +1814,17 @@ namespace skanda {
 	}
 
 	const CompressorOptions skandaCompressorLevels[] = {
-		//      Parser        Hash log     Elements per hash     Nice length     Rep nice length     Max arrivals     Block size
-			{ GREEDY_FAST  ,     14     ,          0          ,       0       ,         0         ,        0       ,      0       },
-			{ GREEDY_NORMAL,     17     ,          0          ,       0       ,         0         ,        0       ,      0       },
-			{ LAZY_NORMAL  ,     17     ,          1          ,       16      ,         0         ,        0       ,      0       },
-			{ LAZY_EXTRA   ,     17     ,          1          ,       16      ,         0         ,        0       ,      0       },
-			{ LAZY_EXTRA   ,     18     ,          2          ,       24      ,         0         ,        0       ,      0       },
-			{ OPTIMAL_FAST ,     18     ,          2          ,       24      ,         8         ,        1       ,      1024    },
-			{ OPTIMAL_FAST ,     19     ,          3          ,       32      ,         12        ,        1       ,      1024    },
-			{ OPTIMAL      ,     22     ,          4          ,       32      ,         16        ,        2       ,      2048    },
-			{ OPTIMAL      ,     24     ,          5          ,       80      ,         40        ,        4       ,      2048    },
-			{ OPTIMAL      ,     26     ,          6          ,       256     ,         128       ,        8       ,      4096    },
+		//      Parser        Hash log     Elements per hash     Nice length     Rep nice length      Block size      Max arrivals
+			{ GREEDY_FAST  ,     14     },
+			{ GREEDY_NORMAL,     17     },
+			{ LAZY_NORMAL  ,     17     ,          1          ,       16      },
+			{ LAZY_EXTRA   ,     17     ,          1          ,       16      },
+			{ LAZY_EXTRA   ,     18     ,          2          ,       24      },
+			{ OPTIMAL_FAST ,     18     ,          2          ,       24      ,         8         ,      1024       ,       1      },
+			{ OPTIMAL_FAST ,     19     ,          3          ,       32      ,         12        ,      1024       ,       1      },
+			{ OPTIMAL      ,     22     ,          4          ,       32      ,         16        ,      2048       ,       2      },
+			{ OPTIMAL      ,     24     ,          5          ,       80      ,         40        ,      2048       ,       4      },
+			{ OPTIMAL      ,     26     ,          6          ,       256     ,         128       ,      4096       ,       8      },
 	};
 
 	size_t skanda_compress(const uint8_t* input, const size_t size, uint8_t* output, const uint8_t level, ProgressCallback* progress) {
@@ -1943,6 +1886,97 @@ namespace skanda {
 		return skanda_memory_estimator<uint32_t>(size, level);
 	}
 
+	const int8_t inc32table[16] = { 0, 0, 0, 1, 0,  4,  4,  4, 4, 4, 4, 4, 4, 4, 4, 4 };
+	const int8_t inc64table[16] = { 0, 0, 0, 1, 4, -1, -2, -3, 4, 4, 4, 4, 4, 4, 4, 4 };
+
+	//Optimized for long matches
+	FORCE_INLINE void copy_match(uint8_t*& dst, const size_t offset, const size_t length) {
+
+		uint8_t* const end = dst + length;
+		const uint8_t* src = dst - offset;
+
+		//If the offset is big enough we can perform a faster copy
+		if (offset >= 16) {
+			//Should be translated to some sse/neon or whatever-that-loads-stores-16-bytes instructions
+			memcpy(dst, src, 16);
+			src += 16;
+			dst += 16;
+			do {
+				memcpy(dst, src, 16);
+				memcpy(dst + 16, src + 16, 16);
+				src += 32;
+				dst += 32;
+			} while (dst < end);
+		}
+		//Else it is a run-length type match
+		else {
+			dst[0] = src[0];
+			dst[1] = src[1];
+			dst[2] = src[2];
+			dst[3] = src[3];
+			src += inc32table[offset];
+			memcpy(dst + 4, src, 4);
+			src += inc64table[offset];
+			memcpy(dst + 8, src, 8);
+			memcpy(dst + 16, src + 8, 8);
+
+			dst += 24;
+			src += 16;
+			do {
+				memcpy(dst, src, 8);
+				memcpy(dst + 8, src + 8, 8);
+				src += 16;
+				dst += 16;
+			} while (dst < end);
+		}
+
+		dst = end;
+	}
+
+	//For 64bit this wont read more than 10 bytes
+	FORCE_INLINE size_t decode_prefixVarInt(const uint8_t*& compressed) {
+
+		size_t result;
+		if (IS_64BIT && IS_LITTLE_ENDIAN) {
+			//Just take 8 bytes, and check the position of the first 1, that will tell how many bytes the distance occupies
+			result = readUint64LE(compressed);
+			size_t index = bitScanForward(result);
+			//We will need additional bytes
+			if (index >= 8) {
+				compressed += 8;
+				result >>= index + 1;
+				const size_t extra = readUint16LE(compressed) & (index == 9 ? 0xFFFF : 0xFF);
+				compressed += 1 + (index == 9);
+				result |= extra << 63 - index;
+			}
+			else {
+				//Throw away those leading 0 and the 1, and advance the compressed data stream
+				result &= UINT64_MAX >> (7 - index) * 8;
+				index++;
+				result >>= index;
+				compressed += index;
+			}
+		}
+		else {
+			result = *compressed++;
+			bool bit = result & 1;
+			result >>= 1;
+			for (size_t i = 1; !bit && i <= 9; i++) {
+				bit = result & 1;
+				result >>= 1;
+				result |= (size_t)(*compressed++) << (i * 7) - 1;
+			}
+		}
+		return result;
+	}
+
+	FORCE_INLINE size_t decode_length(const uint8_t*& compressed) {
+		size_t length = *compressed++;
+		if (length == 255)
+			length += decode_prefixVarInt(compressed);
+		return length;
+	}
+
 	int skanda_decompress(const uint8_t* compressed, const size_t compressedSize, uint8_t* decompressed,
 		const size_t uncompressedSize, ProgressCallback* progress) {
 
@@ -1981,21 +2015,42 @@ namespace skanda {
 			if (token >= (7 << 5)) {
 
 				literalRunLength = decode_length(compressed) + 7;
-				//We dont have the guarantee that compressedEnd >= compressed
-				if (compressed > compressedEnd || decompressed > decompressedEnd ||
-					compressedEnd - compressed < literalRunLength ||
-					decompressedEnd - decompressed < literalRunLength) {
-					return -1;
-				}
 
-				copy_literal_run(compressed, decompressed, literalRunLength);
+				//The maximum number of bytes we could have written without checks for decompression buffer
+				// overflow is 33 (from match length). At the same time, we could have read
+				// 10 (distance) + 11 (match length) + 1 (token) + 11 (literal run length) = 33 bytes.
+				//This limits the number of bytes we can safely copy without checks.
+
+				memcpy(decompressed, compressed, 8);
+				memcpy(decompressed + 8, compressed + 8, 8);
+				memcpy(decompressed + 16, compressed + 16, 8);
+
+				if (literalRunLength > 24) {
+
+					//We dont have the guarantee that compressedEnd >= compressed
+					if (compressed > compressedEnd || decompressed > decompressedEnd ||
+						compressedEnd - compressed < literalRunLength ||
+						decompressedEnd - decompressed < literalRunLength) {
+						return -1;
+					}
+
+					uint8_t* dst = decompressed + 24;
+					const uint8_t* src = compressed + 24;
+					uint8_t* const end = decompressed + literalRunLength;
+					do {
+						memcpy(dst, src, 16);
+						memcpy(dst + 16, src + 16, 16);
+						src += 32;
+						dst += 32;
+					} while (dst < end);
+				}
 			}
 			else {
 				literalRunLength = token >> 5;
 				//If the cpu supports fast unaligned access, it is faster to copy a fixed amount of bytes instead of the needed amount
 				memcpy(decompressed, compressed, 8);
-				decompressed += literalRunLength;
 			}
+			decompressed += literalRunLength;
 			compressed += literalRunLength;
 
 			if (decompressed >= nextProgressReport) {
@@ -2052,25 +2107,21 @@ namespace skanda {
 					}
 					//Else it is a run-length type match
 					else {
-						//Change the offset to at least 2, so that we can copy 2 bytes at a time
 						decompressed[0] = src[0];
-						src += distance > 1;
-
-						//Now the offset is at least 4
-						memcpy(decompressed + 1, src, 2);
-						src += ((size_t)(distance >= 4) << 1) - (distance == 3);
-
-						memcpy(decompressed + 3, src, 4);
-						memcpy(decompressed + 7, src + 4, 4);
-						memcpy(decompressed + 11, src + 8, 4);
-						memcpy(decompressed + 15, src + 12, 1);
+						decompressed[1] = src[1];
+						decompressed[2] = src[2];
+						decompressed[3] = src[3];
+						src += inc32table[distance];
+						memcpy(decompressed + 4, src, 4);
+						src += inc64table[distance];
+						memcpy(decompressed + 8, src, 8);
 					}
 					decompressed += matchLength;
 				}
 			}
 			else {
-				const size_t lengthOverflow = literalRunLength ? 15 : 31;
-				matchLength = token & 0x1F;
+				const size_t lengthOverflow = literalRunLength ? 18 : 34;
+				matchLength = (token & 0x1F) + SKANDA_NORMAL_MIN_MATCH_LENGTH;
 				distance = decode_prefixVarInt(compressed);
 
 				//This can only happen with a new distance. decompressed > decompressedStart always, so no overflow
@@ -2079,7 +2130,7 @@ namespace skanda {
 				}
 
 				if (matchLength == lengthOverflow) {
-					matchLength += decode_length(compressed) + SKANDA_NORMAL_MIN_MATCH_LENGTH;
+					matchLength += decode_length(compressed);
 					//We have the guarantee that decompressed < decompressedEnd, so there is no overflow
 					if (decompressedEnd - decompressed < matchLength)
 						return -1;
@@ -2087,7 +2138,6 @@ namespace skanda {
 					copy_match(decompressed, distance, matchLength);
 				}
 				else {
-					matchLength += SKANDA_NORMAL_MIN_MATCH_LENGTH;
 					const uint8_t* src = decompressed - distance;
 
 					//If the offset is big enough we can perform a faster copy
@@ -2103,23 +2153,20 @@ namespace skanda {
 					}
 					//Else it is a run-length type match
 					else {
-						//Change the offset to at least 2, so that we can copy 2 bytes at a time
+
 						decompressed[0] = src[0];
-						src += distance > 1;
+						decompressed[1] = src[1];
+						decompressed[2] = src[2];
+						decompressed[3] = src[3];
+						src += inc32table[distance];
+						memcpy(decompressed + 4, src, 4);
+						src += inc64table[distance];
+						memcpy(decompressed + 8, src, 8);
 
-						//Now the offset is at least 4
-						memcpy(decompressed + 1, src, 2);
-						src += ((size_t)(distance >= 4) << 1) - (distance == 3);
-
-						memcpy(decompressed + 3, src, 4);
-						memcpy(decompressed + 7, src + 4, 4);
-						memcpy(decompressed + 11, src + 8, 4);
-						if (matchLength > 15) {
-							memcpy(decompressed + 15, src + 12, 4);
-							memcpy(decompressed + 19, src + 16, 4);
-							memcpy(decompressed + 23, src + 20, 4);
-							memcpy(decompressed + 27, src + 24, 4);
-							memcpy(decompressed + 31, src + 28, 2);
+						if (matchLength > 16) {
+							memcpy(decompressed + 16, src + 8, 8);
+							memcpy(decompressed + 24, src + 16, 8);
+							decompressed[32] = src[24];
 						}
 					}
 					decompressed += matchLength;
