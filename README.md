@@ -76,8 +76,8 @@ The algorithm was benchmarked using [lzbench](https://github.com/inikep/lzbench)
 | libdeflate 1.10 -4      |    95 MB/s |   574 MB/s |    69471403 | 32.78 |
 | libdeflate 1.10 -8      |    32 MB/s |   594 MB/s |    66765105 | 31.50 |
 | libdeflate 1.10 -12     |  4.74 MB/s |   595 MB/s |    64686830 | 30.52 |
-| **skanda 1.1.0 -0**     |   423 MB/s |  1779 MB/s |    94468434 | 44.57 |
-| **skanda 1.1.0 -3**     |    73 MB/s |  1687 MB/s |    77993080 | 36.80 |
+| **skanda 1.1.0 -0**     |   506 MB/s |  1897 MB/s |   100717900 | 47.52 |
+| **skanda 1.1.0 -3**     |    82 MB/s |  1728 MB/s |    77286286 | 36.46 |
 | **skanda 1.1.0 -5**     |    17 MB/s |  1814 MB/s |    73219672 | 34.55 |
 | **skanda 1.1.0 -7**     |  5.60 MB/s |  1850 MB/s |    68970276 | 32.54 |
 | **skanda 1.1.0 -9**     |  2.90 MB/s |  1869 MB/s |    66340067 | 31.30 |
