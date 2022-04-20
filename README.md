@@ -54,35 +54,36 @@ You can also get the amount of extra memory used by the compression using skanda
 
 # Benchmarks
 
-The algorithm was benchmarked using [lzbench](https://github.com/inikep/lzbench) on Windows 10, on an i5-6300HQ and compiled with Visual Studio 2019. The file used was produced by tarring the [Silesia corpus](http://sun.aei.polsl.pl/~sdeor/index.php?page=silesia).
+The algorithm was benchmarked using [lzbench](https://github.com/inikep/lzbench) on Windows 10, on an i5-6300HQ and compiled with Visual Studio 2019. The file used was produced by tarring the [Silesia corpus](http://sun.aei.polsl.pl/~sdeor/index.php?page=silesia). The only additional parameter was -t16,16.
 
 | Compressor name         | Compression| Decompress.| Compr. size | Ratio |
-| ---------------         | -----------| -----------| ----------- | ----- |
-| memcpy                  | 11344 MB/s | 11475 MB/s |   211948544 |100.00 |
-| lz4 1.9.3               |   499 MB/s |  3233 MB/s |   100880983 | 47.60 |
-| lz4hc 1.9.3 -1          |    94 MB/s |  2956 MB/s |    83804013 | 39.54 |
-| lz4hc 1.9.3 -4          |    61 MB/s |  3075 MB/s |    79808158 | 37.65 |
-| lz4hc 1.9.3 -9          |    24 MB/s |  3183 MB/s |    77884698 | 36.75 |
-| lz4hc 1.9.3 -12         |  8.75 MB/s |  3234 MB/s |    77262872 | 36.45 |
-| lizard 1.0 -20          |   320 MB/s |  2036 MB/s |    96927491 | 45.73 |
-| lizard 1.0 -23          |    46 MB/s |  2079 MB/s |    82079451 | 38.73 |
-| lizard 1.0 -26          |  5.19 MB/s |  2115 MB/s |    72971214 | 34.43 |
-| lizard 1.0 -29          |  1.70 MB/s |  1979 MB/s |    69333974 | 32.71 |
-| lizard 1.0 -40          |   239 MB/s |  1109 MB/s |    80849296 | 38.15 |
-| lizard 1.0 -43          |    43 MB/s |  1334 MB/s |    71818260 | 33.88 |
-| lizard 1.0 -46          |  8.08 MB/s |  1330 MB/s |    65572865 | 30.94 |
-| lizard 1.0 -49          |  1.65 MB/s |  1337 MB/s |    60862599 | 28.72 |
-| libdeflate 1.10 -1      |   169 MB/s |   554 MB/s |    73505591 | 34.68 |
-| libdeflate 1.10 -4      |    95 MB/s |   574 MB/s |    69471403 | 32.78 |
-| libdeflate 1.10 -8      |    32 MB/s |   594 MB/s |    66765105 | 31.50 |
-| libdeflate 1.10 -12     |  4.74 MB/s |   595 MB/s |    64686830 | 30.52 |
-| **skanda 1.1.1 -0**     |   506 MB/s |  1897 MB/s |   100717900 | 47.52 |
-| **skanda 1.1.1 -3**     |    82 MB/s |  1728 MB/s |    77286286 | 36.46 |
-| **skanda 1.1.1 -5**     |    17 MB/s |  1814 MB/s |    73219672 | 34.55 |
-| **skanda 1.1.1 -7**     |  5.60 MB/s |  1850 MB/s |    68970276 | 32.54 |
-| **skanda 1.1.1 -9**     |  2.90 MB/s |  1869 MB/s |    66340067 | 31.30 |
-| zstd 1.5.2 -1           |   321 MB/s |   775 MB/s |    73422932 | 34.64 |
-| zstd 1.5.2 -6           |    75 MB/s |   728 MB/s |    61481995 | 29.01 |
-| zstd 1.5.2 -12          |    20 MB/s |   771 MB/s |    58196278 | 27.46 |
-| zstd 1.5.2 -17          |  3.85 MB/s |   724 MB/s |    54281107 | 25.61 |
-| zstd 1.5.2 -22          |  1.75 MB/s |   670 MB/s |    52476925 | 24.76 |
+| ---------------         | -----------| -----------| ----------- | ----- | 
+| memcpy                  | 11963 MB/s | 12223 MB/s |   211948544 |100.00 |  
+| lz4 1.9.3               |   496 MB/s |  2977 MB/s |   100880983 | 47.60 |  
+| lz4hc 1.9.3 -1          |    90 MB/s |  2693 MB/s |    83804013 | 39.54 |  
+| lz4hc 1.9.3 -4          |    59 MB/s |  2813 MB/s |    79808158 | 37.65 |  
+| lz4hc 1.9.3 -9          |    24 MB/s |  2905 MB/s |    77884698 | 36.75 |  
+| lz4hc 1.9.3 -12         |  8.53 MB/s |  2953 MB/s |    77262872 | 36.45 |  
+| lizard 1.0 -20          |   312 MB/s |  1825 MB/s |    96927491 | 45.73 |  
+| lizard 1.0 -23          |    45 MB/s |  1867 MB/s |    82079451 | 38.73 |  
+| lizard 1.0 -26          |  5.12 MB/s |  1895 MB/s |    72564556 | 34.24 |  
+| lizard 1.0 -29          |  1.69 MB/s |  1777 MB/s |    68942077 | 32.53 |  
+| lizard 1.0 -40          |   236 MB/s |   979 MB/s |    80849296 | 38.15 |  
+| lizard 1.0 -43          |    42 MB/s |  1182 MB/s |    71818260 | 33.88 |  
+| lizard 1.0 -46          |  8.07 MB/s |  1175 MB/s |    65572865 | 30.94 |  
+| lizard 1.0 -49          |  1.64 MB/s |  1187 MB/s |    60862558 | 28.72 |  
+| libdeflate 1.10 -1      |   171 MB/s |   552 MB/s |    73505591 | 34.68 |  
+| libdeflate 1.10 -4      |    96 MB/s |   573 MB/s |    69471403 | 32.78 |  
+| libdeflate 1.10 -8      |    32 MB/s |   592 MB/s |    66765105 | 31.50 |  
+| libdeflate 1.10 -12     |  4.72 MB/s |   593 MB/s |    64686830 | 30.52 |  
+| **skanda 1.2.0 -0**     |   529 MB/s |  1964 MB/s |    99063914 | 46.74 |  
+| **skanda 1.2.0 -3**     |    75 MB/s |  1728 MB/s |    76534205 | 36.11 |  
+| **skanda 1.2.0 -5**     |    17 MB/s |  1797 MB/s |    71869506 | 33.91 |  
+| **skanda 1.2.0 -7**     |  5.72 MB/s |  1837 MB/s |    68747452 | 32.44 |  
+| **skanda 1.2.0 -9**     |  3.42 MB/s |  1867 MB/s |    66508273 | 31.38 |  
+| **skanda 1.2.0 -10**    |  1.41 MB/s |  1853 MB/s |    65996733 | 31.14 |  
+| zstd 1.5.2 -1           |   324 MB/s |   729 MB/s |    73422932 | 34.64 |  
+| zstd 1.5.2 -6           |    74 MB/s |   691 MB/s |    61481995 | 29.01 |  
+| zstd 1.5.2 -12          |    20 MB/s |   737 MB/s |    58196278 | 27.46 |  
+| zstd 1.5.2 -17          |  3.78 MB/s |   694 MB/s |    54281107 | 25.61 |  
+| zstd 1.5.2 -22          |  1.68 MB/s |   654 MB/s |    52476925 | 24.76 |  
