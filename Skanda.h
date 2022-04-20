@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm v1.1.2
+ * Skanda Compression Algorithm v1.2.0
  * Copyright (c) 2022 Carlos de Diego
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
