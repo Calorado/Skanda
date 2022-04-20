@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm v1.1.1
+ * Skanda Compression Algorithm v1.1.2
  * Copyright (c) 2022 Carlos de Diego
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -17,7 +17,7 @@
 namespace skanda {
 	//Base class that allows to track progress of compression and decompression of
 	// a Skanda stream. You will have to create a child class which implements the functions.
-	// - progress(bytes): the algorithm will pass the number of bytes that have been compressed since last call
+	// - progress(bytes): the algorithm will pass the number of bytes that have been compressed/decompressed
 	// - abort(): if this returns true, the compression or decompression will stop with a return code of 0
 	class ProgressCallback {
 	public:
@@ -30,13 +30,13 @@ namespace skanda {
 	};
 
 	//Compresses "size" bytes of data present in "input", and stores it in "output".
-	//"Level" specifies a tradeoff between compressed size and speed, and must be in range [0, 9].
+	//"Level" specifies a tradeoff between compressed size and speed, and must be in range [0, 10].
 	//You may pass a pointer to an object with base class ProgressCallback, to track progress.
 	//window determines the maximum backwards distance the matches can have, as a power of 2.
 	//Larger values can improve compression, but may hurt decode speed if they exceed CPU cache.
 	//Returns the size of the compressed stream or -1 on failure.
-	size_t skanda_compress(const uint8_t* input, const size_t size, uint8_t* output, const uint8_t level,
-		ProgressCallback* progress = nullptr, const size_t window = 20);
+	size_t skanda_compress(const uint8_t* input, const size_t size, uint8_t* output, const int level,
+		ProgressCallback* progress = nullptr, const int window = 20);
 	//Decompresses contents in "compressed" to "decompressed".
 	//You may also pass a pointer to an object with base class ProgressCallback, to track progress.
 	//Returns 0 on success or -1 on failure or corrupted data.
@@ -47,7 +47,7 @@ namespace skanda {
 	// contain the compressed stream even if it expands.
 	size_t skanda_compress_bound(const size_t size);
 	//Returns the amount of memory the algorithm will consume on compression.
-	size_t skanda_estimate_memory(const size_t size, const uint8_t level, const size_t window = 20);
+	size_t skanda_estimate_memory(const size_t size, const int level, const int window = 20);
 }
 
 #ifdef SKANDA_IMPLEMENTATION
@@ -61,31 +61,19 @@ namespace skanda {
 
 #if defined(_MSC_VER)
 #define FORCE_INLINE __forceinline
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
 #define FORCE_INLINE inline __attribute__((always_inline))
 #else
 #define FORCE_INLINE inline
 #endif
 
-#if (defined(__GNUC__) && (__GNUC__ >= 3)) || (defined(__INTEL_COMPILER) && (__INTEL_COMPILER >= 800)) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__)
 #define expect(expr,value)    (__builtin_expect ((expr),(value)) )
 #define likely(expr)     expect((expr) != 0, 1)
 #define unlikely(expr)   expect((expr) != 0, 0)
 #else
 #define likely(expr)     (expr)
 #define unlikely(expr)   (expr)
-#endif
-
-#if defined(_MSC_VER)
-#if defined(_M_AMD64)
-#include <intrin.h>
-#define x64
-#endif
-#elif defined(__GNUC__)
-#if defined(__amd64__)
-#include <x86intrin.h>
-#define x64
-#endif
 #endif
 
 	//Probably not the correct way to do it but bleh
@@ -108,7 +96,7 @@ namespace skanda {
 		unsigned long result;
 		_BitScanReverse64(&result, value);
 		return result;
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
 		return 63 - __builtin_clzll(value);
 #else
 		const uint8_t tab64[64] = {
@@ -135,7 +123,7 @@ namespace skanda {
 
 	//Way faster than using log2(double), also returns 0 for a value of 0
 	FORCE_INLINE uint64_t int_log2(const uint64_t value) {
-#if defined(_MSC_VER) || defined(__GNUC__)
+#if defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__)
 		if (likely(value != 0))
 			return unsafe_int_log2(value);
 		return 0;
@@ -149,7 +137,7 @@ namespace skanda {
 		unsigned long result;
 		_BitScanForward64(&result, value);
 		return result;
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
 		return __builtin_ctzll(value);
 #else
 		const unsigned int tab64[64] = {
@@ -168,7 +156,7 @@ namespace skanda {
 
 	//Returns the index of the first set bit, starting from the least significant, or 0 if the input is null
 	FORCE_INLINE uint64_t bitScanForward(const uint64_t value) {
-#if defined(_MSC_VER) || defined(__GNUC__)
+#if defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__)
 		if (likely(value != 0))
 			return unsafeBitScanForward(value);
 		return 0;
@@ -201,12 +189,12 @@ namespace skanda {
 	FORCE_INLINE uint64_t readHash5(const uint8_t* const ptr) {
 		if (IS_LITTLE_ENDIAN)
 			return readHash8(ptr) << 24;
-		return readHash8(ptr) >> 24;  //Assumes big endian
+		return readHash8(ptr) >> 24;
 	}
 	FORCE_INLINE uint64_t readHash3(const uint8_t* const ptr) {
 		if (IS_LITTLE_ENDIAN)
 			return readHash4(ptr) << 40;
-		return readHash4(ptr) >> 8;  //Assumes big endian
+		return readHash4(ptr) >> 8;
 	}
 
 #else
@@ -294,7 +282,7 @@ namespace skanda {
 	FORCE_INLINE uint32_t readHash3(const uint8_t* const ptr) {
 		if (IS_LITTLE_ENDIAN)
 			return readHash4(ptr) << 8;
-		return readHash4(ptr) >> 8;  //Assumes big endian
+		return readHash4(ptr) >> 8;
 	}
 
 #endif
@@ -357,17 +345,13 @@ namespace skanda {
 	//Tries to find a match between the two locations, and returns the length
 	//Note that this function should be called with at least MIN_LENGTH + 8 bytes of buffer after limit
 	FORCE_INLINE size_t test_match(const uint8_t* front, const uint8_t* back, const uint8_t* const limit,
-		const size_t minLength, const size_t window) {
+		const size_t minLength, const int window) {
 
 		//Test first bytes
 		//Usually compilers will optimize std::equal as 2 comparisons for minLength 5, 6, etc
 		//We can only use one comparison to make it faster. For powers of 2, std::equal should be good
 		if (IS_64BIT && IS_LITTLE_ENDIAN) {
 			switch (minLength) {
-			case 6:
-				if ((readUint64LE(front) << 16) != (readUint64LE(back) << 16) || ((size_t)(front - back) >> window))
-					return 0;
-				break;
 			case 5:
 				if ((readUint64LE(front) << 24) != (readUint64LE(back) << 24) || ((size_t)(front - back) >> window))
 					return 0;
@@ -393,7 +377,7 @@ namespace skanda {
 
 		if (IS_64BIT && IS_LITTLE_ENDIAN) {
 			while (true) {
-				if (front + 8 > limit) {
+				if (unlikely(front + 8 > limit)) {
 					if (front > limit)
 						return 0;
 
@@ -437,58 +421,40 @@ namespace skanda {
 	const int OPTIMAL_BRUTE = 6;
 
 	struct CompressorOptions {
-		size_t parserFunction;
-		size_t maxHashTableSize;
-		size_t maxElementsPerHash;
-		size_t standardNiceLength;
-		size_t repNiceLength;
-		size_t optimalBlockSize;        // (Optimal)
-		size_t maxArrivals;             // (Optimal)
+		int parserFunction;
+		int maxHashTableSize;
+		int maxElementsPerHash;
+		int standardNiceLength;
+		int repNiceLength;
+		int optimalBlockSize;        // (Optimal)
+		int maxArrivals;             // (Optimal)
 	};
 
-	template<class IntPtr>
+	template<class IntType>
 	struct LZ_Structure {
-		IntPtr matchLength;
-		IntPtr matchDistance;
-		IntPtr literalRunLength;
+		IntType matchLength;
+		IntType matchDistance;
+		IntType literalRunLength;
 	};
 
-	template<class IntPtr>
+	template<class IntType>
 	struct LZ_Match {
-		IntPtr length;
-		IntPtr distance;
-	};
-
-	//A hash table which does not check for collisions, and has a constant size, known at compile time
-	template<class Value, class Hash, size_t hashSize>
-	class StaticHashTable {
-		Value* arr = nullptr;
-	public:
-		//Use 2^x sizes to avoid the use of modulo operator
-		StaticHashTable() {}
-		~StaticHashTable() {
-			delete[] arr;
-		}
-		void init() {
-			arr = new Value[(size_t)1 << hashSize]();
-		}
-		Value& operator[](const size_t value) {
-			return arr[Hash{}(value) >> (IS_64BIT ? 64 : 32) - hashSize];
-		}
+		IntType length;
+		IntType distance;
 	};
 
 	//A hash table which does not check for collisions
 	template<class Value, class Hash>
 	class HashTable {
 		Value* arr = nullptr;
-		size_t hashShift;
+		int hashShift;
 	public:
 		//Use 2^x sizes to avoid the use of modulo operator
 		HashTable() {}
 		~HashTable() {
 			delete[] arr;
 		}
-		void init(const size_t logSize) {
+		void init(const int logSize) {
 			arr = new Value[(size_t)1 << logSize]();
 			hashShift = (IS_64BIT ? 64 : 32) - logSize;
 		}
@@ -497,31 +463,31 @@ namespace skanda {
 		}
 	};
 
-	template<class IntPtr>
+	template<class IntType>
 	class LZ2WayCacheBucket {
-		IntPtr* data;
+		IntType* data;
 	public:
 		LZ2WayCacheBucket() {}
-		LZ2WayCacheBucket(IntPtr* _data) {
+		LZ2WayCacheBucket(IntType* _data) {
 			data = _data;
 		}
 		//Loads the first value, and at the same time pushes a value into that slot.
-		void first(size_t& value) {
-			const IntPtr tmp = data[0];
-			data[0] = value;
-			value = tmp;
+		void first(size_t* value) {
+			const IntType tmp = data[0];
+			data[0] = *value;
+			*value = tmp;
 		}
 		//Loads the second value, and at the same time pushes a value into that slot.
 		//Should be used after loading the first value.
-		void second(size_t& value) {
-			const IntPtr tmp = data[1];
-			data[1] = value;
-			value = tmp;
+		void second(size_t* value) {
+			const IntType tmp = data[1];
+			data[1] = *value;
+			*value = tmp;
 		}
 		//Inserts a value into the first slot.
 		//Used when skipping bytes.
 		void push_in_first(const size_t value) {
-			const IntPtr tmp = data[0];
+			const IntType tmp = data[0];
 			data[0] = value;
 			data[1] = tmp;
 		}
@@ -533,38 +499,38 @@ namespace skanda {
 	};
 
 	//Like a hash table, but stores 2 elements per entry
-	template<class IntPtr, class Hash>
+	template<class IntType, class Hash>
 	class LZ2WayCacheTable {
-		IntPtr* arr = nullptr;
+		IntType* arr = nullptr;
 		size_t hashShift;
 	public:
 		LZ2WayCacheTable() {}
 		~LZ2WayCacheTable() {
 			delete[] arr;
 		}
-		void init(const size_t hashSize) {
-			arr = new IntPtr[(size_t)2 << hashSize]();
-			hashShift = (IS_64BIT ? 64 : 32) - hashSize;
+		void init(const size_t logSize) {
+			arr = new IntType[(size_t)2 << logSize]();
+			hashShift = (IS_64BIT ? 64 : 32) - logSize;
 		}
-		LZ2WayCacheBucket<IntPtr> operator[](size_t value) {
-			return LZ2WayCacheBucket<IntPtr>(arr + (Hash{}(value) >> hashShift) * 2);
+		LZ2WayCacheBucket<IntType> operator[](const size_t value) {
+			return LZ2WayCacheBucket<IntType>(arr + (Hash{}(value) >> hashShift) * 2);
 		}
 	};
 
 	//Used for easier implementation
 	//Please do not use push() and next() on the same bucket
-	template<class IntPtr>
+	template<class IntType>
 	class LzCacheBucket {
-		IntPtr* it;
-		IntPtr* last;
+		IntType* it;
+		IntType* last;
 	public:
 		LzCacheBucket() {}
-		LzCacheBucket(IntPtr* _begin, IntPtr* _end) {
+		LzCacheBucket(IntType* _begin, IntType* _end) {
 			it = _begin;
 			last = _end;
 		}
 		//Pushes a new value into the bucket. Used when skipping bytes
-		void push(size_t newValue) {
+		void push(const size_t newValue) {
 			//An std::move can be faster, but only for big buckets (8 elements or more)
 			for (last--; last != it; last--)
 				last[0] = last[-1];
@@ -576,22 +542,22 @@ namespace skanda {
 		}
 		//Loads the next position, and at the same time, stores the previous position in the same spot
 		//The first time value must have the current position (so it basically pushes the new value into the bucket)
-		void next(size_t& value) {
-			const IntPtr tmp = *it;
-			*it = value;
-			value = tmp;
+		void next(size_t* value) {
+			const IntType tmp = *it;
+			*it = *value;
+			*value = tmp;
 			it++;
 		}
 		//Loads the next position, but without updating the bucket as we go
-		IntPtr next() {
+		IntType next() {
 			return *it++;
 		}
 	};
 
 	//This works like the basic hash table, except that it stores N positions per bucket
-	template<class IntPtr, class Hash>
+	template<class IntType, class Hash>
 	class LzCacheTable {
-		IntPtr* arr = nullptr;
+		IntType* arr = nullptr;
 		size_t hashShift;
 		size_t elementsPerBucket;  //log2
 	public:
@@ -604,38 +570,38 @@ namespace skanda {
 			delete[] arr;
 		}
 		void init(const size_t logSize, const size_t numElements) {
-			arr = new IntPtr[(size_t)1 << logSize << numElements]();
+			arr = new IntType[(size_t)1 << logSize << numElements]();
 			hashShift = (IS_64BIT ? 64 : 32) - logSize;
 			elementsPerBucket = numElements;
 		}
-		LzCacheBucket<IntPtr> operator[](size_t value) {
+		LzCacheBucket<IntType> operator[](size_t value) {
 			value = Hash{}(value) >> hashShift;
-			IntPtr* bucket = arr + (value << elementsPerBucket);
-			return LzCacheBucket<IntPtr>(bucket, bucket + ((size_t)1 << elementsPerBucket));
+			IntType* bucket = arr + (value << elementsPerBucket);
+			return LzCacheBucket<IntType>(bucket, bucket + ((size_t)1 << elementsPerBucket));
 		}
 	};
 
 	//Simple and fast
-	template<class IntPtr>
+	template<class IntType>
 	class HashTableMatchFinder {
-		HashTable<IntPtr, FastIntHash> lzdict3;
-		LzCacheTable<IntPtr, FastIntHash> lzdict4;
-		LzCacheTable<IntPtr, FastIntHash> lzdict8;
+		HashTable<IntType, FastIntHash> lzdict3;
+		LzCacheTable<IntType, FastIntHash> lzdict4;
+		LzCacheTable<IntType, FastIntHash> lzdict8;
 
 	public:
-		void init(const size_t size, const CompressorOptions compressorOptions, const size_t window) {
-			const size_t log2size = MIN3(int_log2(size) - 3, compressorOptions.maxHashTableSize, window - 3);
-			lzdict3.init(std::min(log2size, (size_t)14));
+		void init(const size_t size, const CompressorOptions compressorOptions, const int window) {
+			const int log2size = MIN3((int)int_log2(size) - 3, compressorOptions.maxHashTableSize, window - 3);
+			lzdict3.init(std::min(log2size, 14));
 			lzdict4.init(log2size, compressorOptions.maxElementsPerHash);
 			lzdict8.init(log2size, compressorOptions.maxElementsPerHash);
 		}
 
-		LZ_Match<IntPtr>* find_matches_and_update(const uint8_t* const input, const uint8_t* const inputStart, const uint8_t* const limit,
-			LZ_Match<IntPtr>* matches, size_t highestLength, const CompressorOptions compressorOptions, const size_t window) {
+		LZ_Match<IntType>* find_matches_and_update(const uint8_t* const input, const uint8_t* const inputStart, const uint8_t* const limit,
+			LZ_Match<IntType>* matches, size_t highestLength, const CompressorOptions compressorOptions, const int window) {
 
-			IntPtr& chain3 = lzdict3[readHash3(input)];
-			LzCacheBucket<IntPtr> chain4 = lzdict4[readHash4(input)];
-			LzCacheBucket<IntPtr> chain8 = lzdict8[readHash8(input)];
+			IntType& chain3 = lzdict3[readHash3(input)];
+			LzCacheBucket<IntType> chain4 = lzdict4[readHash4(input)];
+			LzCacheBucket<IntType> chain8 = lzdict8[readHash8(input)];
 
 			if (highestLength < 3) {
 				const uint8_t* where = inputStart + chain3;
@@ -661,7 +627,7 @@ namespace skanda {
 
 				size_t pos = input - inputStart;
 				while (!chain4.ended()) {
-					chain4.next(pos);
+					chain4.next(&pos);
 
 					const uint8_t* where = inputStart + pos;
 
@@ -678,7 +644,7 @@ namespace skanda {
 						highestLength = length;
 						if (highestLength >= 7) {
 							while (!chain4.ended())
-								chain4.next(pos);
+								chain4.next(&pos);
 							break;
 						}
 					}
@@ -692,7 +658,7 @@ namespace skanda {
 
 				size_t pos = input - inputStart;
 				while (!chain8.ended()) {
-					chain8.next(pos);
+					chain8.next(&pos);
 
 					const uint8_t* where = inputStart + pos;
 					if (*(input + highestLength) != *(where + highestLength))
@@ -708,7 +674,7 @@ namespace skanda {
 						highestLength = length;
 						if (highestLength > compressorOptions.standardNiceLength) {
 							while (!chain8.ended())
-								chain8.next(pos);
+								chain8.next(&pos);
 							break;
 						}
 					}
@@ -732,50 +698,50 @@ namespace skanda {
 	const int NO_MATCH_POS = 0;
 
 	//Original match finder implementation from BriefLZ
-	template<class IntPtr>
+	template<class IntType>
 	class BinaryMatchFinder {
 	public:
 
-		IntPtr* nodes = nullptr;
+		IntType* nodes = nullptr;
 		size_t nodeListMask;
 		size_t nodeListSize;
 
-		HashTable<IntPtr, FastIntHash> nodeLookup;
-		HashTable<IntPtr, FastIntHash> lzdict3;
-		LzCacheTable<IntPtr, FastIntHash> lzdict12;
+		HashTable<IntType, FastIntHash> nodeLookup;
+		HashTable<IntType, FastIntHash> lzdict3;
+		LzCacheTable<IntType, FastIntHash> lzdict12;
 
 		~BinaryMatchFinder() {
 			delete[] nodes;
 		}
 		BinaryMatchFinder() {}
 
-		void init(const size_t size, const CompressorOptions compressorOptions, const size_t window) {
+		void init(const size_t size, const CompressorOptions compressorOptions, const int window) {
 
 			const size_t binaryTreeSize = (size_t)1 << std::min(compressorOptions.maxHashTableSize, window);
 			const size_t totalWindowSize = std::min(size, (size_t)1 << window);
 			nodeListSize = std::min(binaryTreeSize, size);
 			nodeListMask = binaryTreeSize - 1;
 			//It is not necessary to initialize to 0
-			nodes = new IntPtr[2 * nodeListSize];
+			nodes = new IntType[2 * nodeListSize];
 
-			nodeLookup.init(MIN3(int_log2(size) - 3, (size_t)20, window - 3));
+			nodeLookup.init(MIN3((int)int_log2(size) - 3, 20, window - 3));
 
-			lzdict3.init(MIN3(int_log2(size) - 3, (size_t)16, window - 3));
+			lzdict3.init(MIN3((int)int_log2(size) - 3, 16, window - 3));
 			if (totalWindowSize > nodeListSize)
 				lzdict12.init(std::max(4, (int)int_log2(totalWindowSize - nodeListSize) - 4), compressorOptions.maxElementsPerHash - 4);
 		}
 
-		LZ_Match<IntPtr>* find_matches_and_update(const uint8_t* const input, const uint8_t* const inputStart, const uint8_t* const limit,
-			LZ_Match<IntPtr>* matches, size_t highestLength, const CompressorOptions compressorOptions, const size_t window) {
+		LZ_Match<IntType>* find_matches_and_update(const uint8_t* const input, const uint8_t* const inputStart, const uint8_t* const limit,
+			LZ_Match<IntType>* matches, size_t highestLength, const CompressorOptions compressorOptions, const int window) {
 
 			const size_t inputPosition = input - inputStart;
 
 			// First try to get a length 3 match
-			IntPtr& chain3 = lzdict3[readHash3(input)];
+			IntType& chain3 = lzdict3[readHash3(input)];
 			const uint8_t* where = inputStart + chain3;
 			size_t length = test_match(input, where, limit, 3, window);
 
-			if (length > highestLength) {
+			if (length > highestLength || (compressorOptions.parserFunction == OPTIMAL_BRUTE && length)) {
 				matches->distance = input - where;
 				matches->length = length;
 				highestLength = length;
@@ -791,12 +757,12 @@ namespace skanda {
 			//If we reach this position on the back stop the search
 			const size_t btEnd = inputPosition < nodeListSize ? 0 : inputPosition - nodeListSize;
 
-			IntPtr& lookupEntry = nodeLookup[readHash4(input)];
+			IntType& lookupEntry = nodeLookup[readHash4(input)];
 			size_t backPosition = lookupEntry;
 			lookupEntry = inputPosition;
 
-			IntPtr* lesserNode = &nodes[2 * (lookupEntry & nodeListMask)];
-			IntPtr* greaterNode = &nodes[2 * (lookupEntry & nodeListMask) + 1];
+			IntType* lesserNode = &nodes[2 * (lookupEntry & nodeListMask)];
+			IntType* greaterNode = &nodes[2 * (lookupEntry & nodeListMask) + 1];
 			const uint8_t* lesserFront = input;
 			const uint8_t* greaterFront = input;
 
@@ -819,8 +785,8 @@ namespace skanda {
 				back += extraLength;
 
 				length = front - input;
-				IntPtr* const nextNode = &nodes[2 * (backPosition & nodeListMask)];
-				if (length > highestLength) {
+				IntType* const nextNode = &nodes[2 * (backPosition & nodeListMask)];
+				if (length > highestLength || (compressorOptions.parserFunction == OPTIMAL_BRUTE && length > 3)) {
 					matches->distance = front - back;
 					matches->length = length;
 					matches++;
@@ -851,10 +817,10 @@ namespace skanda {
 
 			if (inputPosition > nodeListSize && ((size_t)1 << window) > nodeListSize) {
 
-				LzCacheBucket<IntPtr> cacheBucket = lzdict12[readHash12(input)];
+				LzCacheBucket<IntType> cacheBucket = lzdict12[readHash12(input)];
 
 				while (!cacheBucket.ended()) {
-					const IntPtr pos = cacheBucket.next();
+					const IntType pos = cacheBucket.next();
 
 					const uint8_t* const where = inputStart + pos;
 					if (*(input + highestLength) != *(where + highestLength))
@@ -880,7 +846,7 @@ namespace skanda {
 		}
 
 		void update_position(const uint8_t* const input, const uint8_t* const inputStart, const uint8_t* const limit,
-			const CompressorOptions& compressorOptions, const size_t window) {
+			const CompressorOptions& compressorOptions, const int window) {
 
 			const size_t inputPosition = input - inputStart;
 			lzdict3[readHash3(input)] = inputPosition;
@@ -891,12 +857,12 @@ namespace skanda {
 			const uint8_t* positionSkip = std::min(limit, input + compressorOptions.standardNiceLength);
 			//If we reach this position on the back stop the update
 			const size_t btEnd = inputPosition < nodeListSize ? 0 : inputPosition - nodeListSize;
-			IntPtr& lookupEntry = nodeLookup[readHash4(input)];
+			IntType& lookupEntry = nodeLookup[readHash4(input)];
 			size_t backPosition = lookupEntry;
 			lookupEntry = inputPosition;
 
-			IntPtr* lesserNode = &nodes[2 * (inputPosition & nodeListMask)];
-			IntPtr* greaterNode = &nodes[2 * (inputPosition & nodeListMask) + 1];
+			IntType* lesserNode = &nodes[2 * (inputPosition & nodeListMask)];
+			IntType* greaterNode = &nodes[2 * (inputPosition & nodeListMask) + 1];
 
 			const uint8_t* lesserFront = input;
 			const uint8_t* greaterFront = input;
@@ -917,7 +883,7 @@ namespace skanda {
 				front += length;
 				back += length;
 
-				IntPtr* const nextNode = &nodes[2 * (backPosition & nodeListMask)];
+				IntType* const nextNode = &nodes[2 * (backPosition & nodeListMask)];
 				if (front >= positionSkip) {
 					*lesserNode = nextNode[0];
 					*greaterNode = nextNode[1];
@@ -943,26 +909,18 @@ namespace skanda {
 	//How many bytes to process before reporting progress or checking for abort flag
 	const int SKANDA_PROGRESS_REPORT_PERIOD = 512 * 1024;
 
-	FORCE_INLINE void copy_literal_run(const uint8_t* src, uint8_t*& dst, const size_t length) {
+	FORCE_INLINE void copy_literal_run(const uint8_t* src, uint8_t* dst, const size_t length) {
 
 		uint8_t* const end = dst + length;
-		memcpy(dst, src, 16);
-		memcpy(dst + 16, src + 16, 16);
-		if (length > 32) {
+		do {
+			memcpy(dst, src, 16);
+			memcpy(dst + 16, src + 16, 16);
 			src += 32;
 			dst += 32;
-			do {
-				memcpy(dst, src, 16);
-				memcpy(dst + 16, src + 16, 16);
-				src += 32;
-				dst += 32;
-			} while (dst < end);
-		}
-
-		dst = end;
+		} while (dst < end);
 	}
 
-	FORCE_INLINE void encode_prefixVarInt(uint8_t*& output, size_t& var, const bool nonZero) {
+	FORCE_INLINE void encode_prefixVarInt(uint8_t*& output, size_t var, const bool nonZero) {
 
 		size_t index = (nonZero ? unsafe_int_log2(var) : int_log2(var)) / 7;
 		if (IS_64BIT && IS_LITTLE_ENDIAN) {
@@ -999,9 +957,9 @@ namespace skanda {
 		}
 	}
 
-	FORCE_INLINE void encode_length(uint8_t*& output, size_t& var, const size_t overflow) {
+	FORCE_INLINE void encode_length(uint8_t*& output, size_t var, const size_t overflow) {
 		var -= overflow;
-		if (var >= 255) {
+		if (unlikely(var >= 255)) {
 			*output++ = 255;
 			var -= 255;
 			encode_prefixVarInt(output, var, 0);
@@ -1030,17 +988,17 @@ namespace skanda {
 			*controlByte = (literalRunLength << 5);
 			//It is faster to unconditionally copy 8 bytes
 			memcpy(output, literalRunStart, 8);
-			output += literalRunLength;
 		}
+		output += literalRunLength;
 	}
 
 	FORCE_INLINE void skanda_encode_match(uint8_t*& output, uint8_t* const controlByte,
-		size_t& matchLength, size_t& distance, size_t& repOffset) {
+		size_t matchLength, size_t distance, size_t* repOffset) {
 
 		//Repetition match found
-		if (distance == repOffset) {
+		if (distance == *repOffset) {
 			matchLength -= SKANDA_REP_MIN_MATCH_LENGTH;
-			if (matchLength >= 15) {
+			if (unlikely(matchLength >= 15)) {
 				*controlByte |= 31;
 				encode_length(output, matchLength, 15);
 			}
@@ -1050,12 +1008,12 @@ namespace skanda {
 		//Standard match encoding
 		else {
 			matchLength -= SKANDA_NORMAL_MIN_MATCH_LENGTH;
-			repOffset = distance;
+			*repOffset = distance;
 
 			encode_prefixVarInt(output, distance, 1);
 
 			const size_t lengthOverflow = (*controlByte) ? 15 : 31;
-			if (matchLength >= lengthOverflow) {
+			if (unlikely(matchLength >= lengthOverflow)) {
 				*controlByte |= lengthOverflow;
 				encode_length(output, matchLength, lengthOverflow);
 			}
@@ -1064,27 +1022,32 @@ namespace skanda {
 		}
 	}
 
-	//It is important to have all these variables as compile-time constants to get maximum performance
-	template<class IntPtr>
+	template<class IntType>
 	size_t skanda_compress_ultra_fast(const uint8_t* input, const size_t size, uint8_t* output,
-		ProgressCallback* progress, const size_t window) {
+		ProgressCallback* progress, const int window) {
+
+		//Constants for this encoder
+		const size_t hashTableSize = 12;
+		const size_t accelerationThreshold = 4;
+		const size_t accelerationMax = 32;
 
 		const uint8_t* const inputStart = input;
 		const uint8_t* const outputStart = output;
-		//The last match must end before this limit
+		//The last match or literal run must end before this limit
 		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
-		const uint8_t* lastProgressReport;
 
-		//Data for the format
 		size_t repOffset = 1;
-		//Skip first byte
+		//Keeps track of how many match searches we have made without success. 
+		//When we dont find matches, we will skip more or less depending on this variable.
+		size_t acceleration = 1 << accelerationThreshold;
 		const uint8_t* literalRunStart = input;
+		//Skip first byte
 		input++;
 
-		//Hash table for match finder
-		StaticHashTable<IntPtr, FastIntHash, 12> lzdict;
+		//The match finder is a simple hash table with constant size
+		HashTable<IntType, FastIntHash> lzdict;
 		try {
-			lzdict.init();
+			lzdict.init(hashTableSize);
 		}
 		catch (const std::bad_alloc& e) {
 			return -1;
@@ -1095,69 +1058,80 @@ namespace skanda {
 
 			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
 				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
-			lastProgressReport = input;
 
-			while (input < nextProgressReport) {
+			while (likely(input < nextProgressReport)) {
 
+				//Get possible match location and update the table
+				IntType* const dictEntry = &lzdict[readHash5(input)];
+				const uint8_t* match = inputStart + *dictEntry;
+				*dictEntry = input - inputStart;
 				//Try to find a match
-				IntPtr* dictEntry = &lzdict[readHash5(input)];
-				size_t matchLength = test_match(input, inputStart + *dictEntry, compressionLimit, 5, window);
+				size_t matchLength = test_match(input, match, compressionLimit, 5, window);
 
 				//Have we found a match?
 				if (matchLength) {
+
+					//Add the next position to the table as well
+					lzdict[readHash5(input + 1)] = input - inputStart + 1;
+
+					//Try to extend the match to the left
+					while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
+						matchLength++;
+						input--;
+						match--;
+					}
+					size_t distance = input - match;
+
 					//First output the literal run
 					uint8_t* const controlByte = output++;
 					skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
-					const size_t pos = input - inputStart;
-					size_t distance = pos - *dictEntry;
-
-					//Update hash table. Since we already have the hash bucket for the first byte, reuse it
-					*dictEntry = pos;
-					lzdict[readHash5(input + 1)] = pos + 1;
-
 					input += matchLength;
 					literalRunStart = input;
 					//Output the match
-					skanda_encode_match(output, controlByte, matchLength, distance, repOffset);
+					skanda_encode_match(output, controlByte, matchLength, distance, &repOffset);
+
+					acceleration = 1 << accelerationThreshold;
 				}
-				//If there isnt advance one byte and try again
+				//If there isnt advance the position
 				else {
-					*dictEntry = input - inputStart;
-					input++;
+					input += acceleration >> accelerationThreshold;
+					acceleration += acceleration < (accelerationMax << accelerationThreshold);
 				}
 			}
 
 			if (progress->abort())
 				return 0;
-			progress->progress(input - lastProgressReport);
+			progress->progress(input - inputStart);
 		}
 
+		//Due to the acceleration we might have gone beyond the end
+		if (input > compressionLimit)
+			input = compressionLimit;
 		//Output the last literal run. This is necessary even when no more literals remain, as the decoder expects to end with this
 		uint8_t* const controlByte = output++;
 		skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
 
-	template<class IntPtr>
+	template<class IntType>
 	size_t skanda_compress_greedy(const uint8_t* input, const size_t size, uint8_t* output,
-		ProgressCallback* progress, const size_t window, const CompressorOptions compressorOptions) {
+		ProgressCallback* progress, const int window, const CompressorOptions compressorOptions) {
 
 		const uint8_t* const inputStart = input;
 		const uint8_t* const outputStart = output;
 		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
-		const uint8_t* lastProgressReport;
 
 		size_t repOffset = 1;
 		const uint8_t* literalRunStart = input;
 		input++;
 
-		const size_t hashSize = MIN3(int_log2(size) - 3, compressorOptions.maxHashTableSize, window - 3);
-		HashTable<IntPtr, FastIntHash> lzdict;
+		const size_t hashSize = MIN3((int)int_log2(size) - 3, compressorOptions.maxHashTableSize, window - 3);
+		HashTable<IntType, FastIntHash> lzdict;
 		try {
 			lzdict.init(hashSize);
 		}
@@ -1169,148 +1143,183 @@ namespace skanda {
 
 			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
 				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
-			lastProgressReport = input;
 
 			while (input < nextProgressReport) {
 
-				IntPtr* dictEntry = &lzdict[readHash5(input)];
-				size_t matchLength = test_match(input, inputStart + *dictEntry, compressionLimit, 5, window);
+				IntType* dictEntry = &lzdict[readHash5(input)];
+				const uint8_t* match = inputStart + *dictEntry;
+				size_t matchLength = test_match(input, match, compressionLimit, 5, window);
 
 				if (matchLength) {
+					//Add as many positions as minimum searched length
+					*dictEntry = input - inputStart;
+					lzdict[readHash5(input + 1)] = input - inputStart + 1;
+					lzdict[readHash5(input + 2)] = input - inputStart + 2;
+					lzdict[readHash5(input + 3)] = input - inputStart + 3;
+					lzdict[readHash5(input + 4)] = input - inputStart + 4;
+
+					while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
+						matchLength++;
+						input--;
+						match--;
+					}
+					size_t distance = input - match;
+
 					uint8_t* const controlByte = output++;
 					skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
-					const size_t pos = input - inputStart;
-					size_t distance = pos - *dictEntry;
+					input += matchLength;
+					literalRunStart = input;
+					skanda_encode_match(output, controlByte, matchLength, distance, &repOffset);
+					continue;
+				}
 
-					*dictEntry = pos;
-					lzdict[readHash5(input + 1)] = pos + 1;
-					lzdict[readHash5(input + 2)] = pos + 2;
-					lzdict[readHash5(input + 3)] = pos + 3;
-					lzdict[readHash5(input + 4)] = pos + 4;
+				*dictEntry = input - inputStart;
+				input++;
+
+				//Very low probability of finding a rep match
+				if (input - literalRunStart > 6)
+					continue;
+
+				//After a literal it is possible to have a rep match. This is very cheap and gives a nice boost
+				matchLength = test_match(input, input - repOffset, compressionLimit, 3, window);
+
+				if (matchLength) {
+					//Make sure we do not go beyond the end
+					if (input == compressionLimit)
+						break;
+
+					uint8_t* const controlByte = output++;
+					skanda_encode_literal_run(input, literalRunStart, controlByte, output);
+
+					lzdict[readHash5(input)] = input - inputStart;
 
 					input += matchLength;
 					literalRunStart = input;
-					skanda_encode_match(output, controlByte, matchLength, distance, repOffset);
-				}
-				else {
-					*dictEntry = input - inputStart;
-					input++;
+					skanda_encode_match(output, controlByte, matchLength, repOffset, &repOffset);
 				}
 			}
 
 			if (progress->abort())
 				return 0;
-			progress->progress(input - lastProgressReport);
+			progress->progress(input - inputStart);
 		}
 
 		uint8_t* const controlByte = output++;
 		skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
 
 	//Try to find the longest match for a given position. Then try to find an even longer one in the next.
 	//If it is found, code a literal, and the longer one found. If not, code the original.
-	template<class IntPtr>
+	template<class IntType>
 	FORCE_INLINE void skanda_fast_lazy_search(const uint8_t* input, const uint8_t* const inputStart, const uint8_t* const limit,
-		LZ2WayCacheTable<IntPtr, FastIntHash>& lzdict, size_t& bestMatchLength, size_t& bestMatchDistance,
-		size_t& lazySteps, size_t& testedPositions, const size_t window, const CompressorOptions compressorOptions) {
+		LZ2WayCacheTable<IntType, FastIntHash>& lzdict, size_t* bestMatchLength, size_t* bestMatchDistance,
+		int* lazySteps, int* testedPositions, const size_t repOffset, const int window, const CompressorOptions& compressorOptions) {
 
-		testedPositions = 1;
-		LZ2WayCacheBucket<IntPtr> dictEntry = lzdict[readHash5(input)];
+		//First try to find a match in the rep offset. If it is found simply take it
+		*bestMatchLength = test_match(input + 1, input + 1 - repOffset, limit, 3, window);
+		if (*bestMatchLength) {
+			*bestMatchDistance = repOffset;
+			*testedPositions = 0;
+			*lazySteps = 1;
+			return;
+		}
+
+		*testedPositions = 1;
+		LZ2WayCacheBucket<IntType> dictEntry = lzdict[readHash5(input)];
 
 		//Test first entry
 		size_t pos = input - inputStart;
-		dictEntry.first(pos);
+		dictEntry.first(&pos);
 		const uint8_t* where = inputStart + pos;
-		bestMatchLength = test_match(input, where, limit, 5, window);
-		bestMatchDistance = input - where;
-		if (bestMatchLength >= compressorOptions.standardNiceLength) {
+		*bestMatchLength = test_match(input, where, limit, 5, window);
+		*bestMatchDistance = input - where;
+		if (*bestMatchLength >= compressorOptions.standardNiceLength) {
 			dictEntry.push_in_second(pos);
-			lazySteps = 0;
+			*lazySteps = 0;
 			return;
 		}
 
 		//Test second entry
-		dictEntry.second(pos);
+		dictEntry.second(&pos);
 		where = inputStart + pos;
 		//Simple heuristic: as we are looking for a longer match, we can first
 		//test the byte that would make this match longer. There is a high
 		//chance it will differ, so the rest of the match wont need to be tested
-		if (*(input + bestMatchLength) == *(where + bestMatchLength)) {
+		if (*(input + *bestMatchLength) == *(where + *bestMatchLength)) {
 			const size_t length = test_match(input, where, limit, 5, window);
-			if (length > bestMatchLength) {
-				bestMatchDistance = input - where;
-				bestMatchLength = length;
+			if (length > *bestMatchLength) {
+				*bestMatchDistance = input - where;
+				*bestMatchLength = length;
 
-				if (bestMatchLength >= compressorOptions.standardNiceLength) {
-					lazySteps = 0;
+				if (*bestMatchLength >= compressorOptions.standardNiceLength) {
+					*lazySteps = 0;
 					return;
 				}
 			}
 		}
 
 		//Nothing was found, code a literal and try again from the begining
-		if (bestMatchLength < 5) {
-			lazySteps = 1;
+		if (*bestMatchLength < 5) {
+			*lazySteps = 1;
 			return;
 		}
 
 		//Now try to find a longer match at next position
 		input++;
-		lazySteps = 0;
-		testedPositions = 2;
+		*lazySteps = 0;
+		*testedPositions = 2;
 		dictEntry = lzdict[readHash5(input)];
 
 		//Test first entry
 		pos = input - inputStart;
-		dictEntry.first(pos);
+		dictEntry.first(&pos);
 		where = inputStart + pos;
-		if (*(input + bestMatchLength) == *(where + bestMatchLength)) {
+		if (*(input + *bestMatchLength) == *(where + *bestMatchLength)) {
 			const size_t length = test_match(input, where, limit, 5, window);
-			if (length > bestMatchLength) {
-				bestMatchDistance = input - where;
-				bestMatchLength = length;
-				lazySteps = 1;
+			if (length > *bestMatchLength) {
+				*bestMatchDistance = input - where;
+				*bestMatchLength = length;
+				*lazySteps = 1;
 
-				if (bestMatchLength >= compressorOptions.standardNiceLength) {
+				if (*bestMatchLength >= compressorOptions.standardNiceLength) {
 					dictEntry.push_in_second(pos);
 					return;
 				}
 			}
 		}
 		//Test second entry
-		dictEntry.second(pos);
+		dictEntry.second(&pos);
 		where = inputStart + pos;
-		if (*(input + bestMatchLength) == *(where + bestMatchLength)) {
+		if (*(input + *bestMatchLength) == *(where + *bestMatchLength)) {
 			const size_t length = test_match(input, where, limit, 5, window);
-			if (length > bestMatchLength) {
-				bestMatchDistance = input - where;
-				bestMatchLength = length;
-				lazySteps = 1;
+			if (length > *bestMatchLength) {
+				*bestMatchDistance = input - where;
+				*bestMatchLength = length;
+				*lazySteps = 1;
 			}
 		}
 	}
 
-	template<class IntPtr>
+	template<class IntType>
 	size_t skanda_compress_lazy_fast(const uint8_t* input, const size_t size, uint8_t* output,
-		ProgressCallback* progress, const size_t window, const CompressorOptions compressorOptions) {
+		ProgressCallback* progress, const int window, const CompressorOptions compressorOptions) {
 
 		const uint8_t* const inputStart = input;
 		const uint8_t* const outputStart = output;
 		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
-		const uint8_t* lastProgressReport;
 
 		size_t repOffset = 1;
 		const uint8_t* literalRunStart = input;
 		input++;
 
-		const size_t hashSize = MIN3(int_log2(size) - 3, compressorOptions.maxHashTableSize, window - 3);
-		LZ2WayCacheTable<IntPtr, FastIntHash> lzdict;
+		const size_t hashSize = MIN3((int)int_log2(size) - 3, compressorOptions.maxHashTableSize, window - 3);
+		LZ2WayCacheTable<IntType, FastIntHash> lzdict;
 		try {
 			lzdict.init(hashSize);
 		}
@@ -1322,101 +1331,102 @@ namespace skanda {
 
 			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
 				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
-			lastProgressReport = input;
 
 			while (input < nextProgressReport) {
 
 				size_t matchLength;
 				size_t distance;
-				size_t lazySteps;   //bytes to skip because of lazy matching
-				size_t testedPositions;   //number of positions that have been added to hash table
+				int lazySteps;   //bytes to skip because of lazy matching
+				int testedPositions;   //number of positions that have been added to hash table
 
-				skanda_fast_lazy_search<IntPtr>(input, inputStart, compressionLimit, lzdict,
-					matchLength, distance, lazySteps, testedPositions, window, compressorOptions);
+				skanda_fast_lazy_search<IntType>(input, inputStart, compressionLimit, lzdict,
+					&matchLength, &distance, &lazySteps, &testedPositions, repOffset, window, compressorOptions);
 
 				input += lazySteps;
 
 				if (matchLength) {
+					
+					//If the match is RLE-like, add only the last repetition of the run
+					const uint8_t* const matchEnd = input + matchLength;
+					const uint8_t* matchPos = distance < matchLength ? matchEnd - distance : input + testedPositions - lazySteps;
+					for (; matchPos != matchEnd; matchPos++)
+						lzdict[readHash5(matchPos)].push_in_first(matchPos - inputStart);
+
+					const uint8_t* match = input - distance;
+					while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
+						matchLength++;
+						input--;
+						match--;
+					}
 
 					uint8_t* const controlByte = output++;
 					skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
-					const uint8_t* const matchEnd = input + matchLength;
-					input += testedPositions - lazySteps;
-
-					//If the match is RLE-like, add only the last repetition of the run
-					if (distance < matchLength) 
-						input = matchEnd - distance;
-					for (; input != matchEnd; input++)
-						lzdict[readHash5(input)].push_in_first(input - inputStart);
-
+					input = matchEnd;
 					literalRunStart = input;
-					skanda_encode_match(output, controlByte, matchLength, distance, repOffset);
+					skanda_encode_match(output, controlByte, matchLength, distance, &repOffset);
 				}
 			}
 
 			if (progress->abort())
 				return 0;
-			progress->progress(input - lastProgressReport);
+			progress->progress(input - inputStart);
 		}
 
 		uint8_t* const controlByte = output++;
 		skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
 
 	//Same principle as the last function, but with additional heuristics to improve ratio
-	template<class IntPtr>
+	template<class IntType>
 	FORCE_INLINE void skanda_lazy_search(const uint8_t* input, const uint8_t* const inputStart, const uint8_t* const limit,
-		LzCacheTable<IntPtr, FastIntHash>& lzdict4, LzCacheTable<IntPtr, FastIntHash>& lzdict8, size_t& bestLength,
-		size_t& bestDistance, size_t& repOffset, size_t& lazySteps, size_t& testedPositions,
-		const CompressorOptions compressorOptions, const size_t window) {
-
-		LzCacheBucket<IntPtr> chain4 = lzdict4[readHash4(input)];
-		LzCacheBucket<IntPtr> chain8 = lzdict8[readHash8(input)];
-		size_t pos = input - inputStart;
-
-		lazySteps = 0;
-		testedPositions = 1;
+		LzCacheTable<IntType, FastIntHash>& lzdict4, LzCacheTable<IntType, FastIntHash>& lzdict8, size_t* bestLength,
+		size_t* bestDistance, const size_t repOffset, int* lazySteps, int* testedPositions,
+		const CompressorOptions compressorOptions, const int window) {
 
 		//First try to find a match in the rep offset. If it is found simply take it
-		size_t length = test_match(input, input - repOffset, limit, 3, window);
-		if (length) {
-			bestDistance = repOffset;
-			bestLength = length;
-			chain4.push(pos);
-			chain8.push(pos);
+		*bestLength = test_match(input + 1, input + 1 - repOffset, limit, 3, window);
+		if (*bestLength) {
+			*bestDistance = repOffset;
+			*testedPositions = 0;
+			*lazySteps = 1;
 			return;
 		}
 
-		bestLength = 0;
+		LzCacheBucket<IntType> chain4 = lzdict4[readHash4(input)];
+		LzCacheBucket<IntType> chain8 = lzdict8[readHash8(input)];
+		size_t pos = input - inputStart;
+		*lazySteps = 0;
+		*testedPositions = 1;
 		size_t bestMatchCost = 0;
+		size_t length;
 
 		//If no rep offset was found try to get a length 8 match
 		while (!chain8.ended()) {
-			chain8.next(pos);
+			chain8.next(&pos);
 
 			const uint8_t* where = inputStart + pos;
 
-			if (*(input + bestLength) != *(where + bestLength))
+			if (*(input + *bestLength) != *(where + *bestLength))
 				continue;
 
 			length = test_match(input, where, limit, 8, window);
 
 			size_t distance = input - where;
 			size_t matchCost = 2 + unsafe_int_log2(distance) / 7;
-			if (length + bestMatchCost > matchCost + bestLength) {
-				bestDistance = distance;
-				bestLength = length;
+			if (length + bestMatchCost > matchCost + *bestLength) {
+				*bestDistance = distance;
+				*bestLength = length;
 				bestMatchCost = matchCost;
 
-				if (bestLength >= compressorOptions.standardNiceLength) {
+				if (*bestLength >= compressorOptions.standardNiceLength) {
 					while (!chain8.ended())
-						chain8.next(pos);
+						chain8.next(&pos);
 					chain4.push(input - inputStart);
 					return;
 				}
@@ -1424,30 +1434,30 @@ namespace skanda {
 		}
 
 		//If still nothing was found, try a length 4
-		if (bestLength < 8) {
+		if (*bestLength < 8) {
 
 			pos = input - inputStart;
 			while (!chain4.ended()) {
-				chain4.next(pos);
+				chain4.next(&pos);
 
 				const uint8_t* where = inputStart + pos;
 
-				if (*(input + bestLength) != *(where + bestLength))
+				if (*(input + *bestLength) != *(where + *bestLength))
 					continue;
 
 				length = test_match(input, where, limit, 4, window);
 
 				size_t distance = input - where;
 				size_t matchCost = 2 + unsafe_int_log2(distance) / 7;
-				if (length + bestMatchCost > matchCost + bestLength) {
-					bestDistance = distance;
-					bestLength = length;
+				if (length + bestMatchCost > matchCost + *bestLength) {
+					*bestDistance = distance;
+					*bestLength = length;
 					bestMatchCost = matchCost;
 					//We did not found any length 8 earlier, so we wont find anything better than 7 now
-					if (bestLength >= 7) {
-						if (bestLength >= compressorOptions.standardNiceLength) {
+					if (*bestLength >= 7) {
+						if (*bestLength >= compressorOptions.standardNiceLength) {
 							while (!chain4.ended())
-								chain4.next(pos);
+								chain4.next(&pos);
 							return;
 						}
 						break;
@@ -1456,8 +1466,8 @@ namespace skanda {
 			}
 
 			//No match found, code a literal and retry
-			if (bestLength == 0) {
-				lazySteps = 1;
+			if (*bestLength == 0) {
+				*lazySteps = 1;
 				return;
 			}
 		}
@@ -1470,62 +1480,51 @@ namespace skanda {
 		pos = input - inputStart;
 		lzdict4[readHash4(input)].push(pos);  //We wont search for length < 8
 		chain8 = lzdict8[readHash8(input)];
-		testedPositions = 2;
-
-		//Increase rep offset minimum length to 4
-		length = test_match(input, input - repOffset, limit, 4, window);
-		if (length) {
-			bestDistance = repOffset;
-			bestLength = length;
-			chain8.push(pos);
-			lazySteps = 1;
-			return;
-		}
+		*testedPositions = 2;
 
 		//Only try to find matches of length at least 8 at pos + 1
 		while (!chain8.ended()) {
-			chain8.next(pos);
+			chain8.next(&pos);
 
 			const uint8_t* where = inputStart + pos;
 
-			if (*(input + bestLength) != *(where + bestLength))
+			if (*(input + *bestLength) != *(where + *bestLength))
 				continue;
 
 			length = test_match(input, where, limit, 8, window);
 
 			size_t distance = input - where;
 			size_t matchCost = 2 + unsafe_int_log2(distance) / 7;
-			if (length + bestMatchCost > matchCost + bestLength) {
-				bestDistance = distance;
-				bestLength = length;
+			if (length + bestMatchCost > matchCost + *bestLength) {
+				*bestDistance = distance;
+				*bestLength = length;
 				bestMatchCost = matchCost;
-				lazySteps = 1;
+				*lazySteps = 1;
 
-				if (bestLength >= compressorOptions.standardNiceLength) {
+				if (*bestLength >= compressorOptions.standardNiceLength) {
 					while (!chain8.ended())
-						chain8.next(pos);
+						chain8.next(&pos);
 					return;
 				}
 			}
 		}
 	}
 
-	template<class IntPtr>
+	template<class IntType>
 	size_t skanda_compress_lazy(const uint8_t* input, const size_t size, uint8_t* output,
-		ProgressCallback* progress, const size_t window, const CompressorOptions compressorOptions) {
+		ProgressCallback* progress, const int window, const CompressorOptions compressorOptions) {
 
 		const uint8_t* const inputStart = input;
 		const uint8_t* const outputStart = output;
 		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
-		const uint8_t* lastProgressReport;
 
 		size_t repOffset = 1;
 		const uint8_t* literalRunStart = input;
 		input++;
 
-		const size_t log2size = MIN3(int_log2(size) - 3, compressorOptions.maxHashTableSize, window - 3);
-		LzCacheTable<IntPtr, FastIntHash> lzdict4;
-		LzCacheTable<IntPtr, FastIntHash> lzdict8;
+		const int log2size = MIN3((int)int_log2(size) - 3, compressorOptions.maxHashTableSize, window - 3);
+		LzCacheTable<IntType, FastIntHash> lzdict4;
+		LzCacheTable<IntType, FastIntHash> lzdict8;
 
 		try {
 			lzdict4.init(log2size, compressorOptions.maxElementsPerHash);
@@ -1539,78 +1538,87 @@ namespace skanda {
 
 			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
 				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
-			lastProgressReport = input;
 
 			while (input < nextProgressReport) {
 
 				size_t matchLength;
 				size_t distance;
-				size_t lazySteps;
-				size_t testedPositions;
+				int lazySteps;
+				int testedPositions;
 
-				skanda_lazy_search(input, inputStart, compressionLimit, lzdict4, lzdict8, matchLength,
-					distance, repOffset, lazySteps, testedPositions, compressorOptions, window);
+				skanda_lazy_search(input, inputStart, compressionLimit, lzdict4, lzdict8, &matchLength,
+					&distance, repOffset, &lazySteps, &testedPositions, compressorOptions, window);
 
 				input += lazySteps;
 
 				if (matchLength) {
 
+					const uint8_t* const matchEnd = input + matchLength;
+
+					const uint8_t* matchPos;
+					//If the match is RLE-like, add only the last repetition of the run
+					if (distance < matchLength)
+						matchPos = matchEnd - distance;
+					else
+						matchPos = input + testedPositions - lazySteps;
+					for (; matchPos != matchEnd; matchPos++) {
+						lzdict4[readHash4(matchPos)].push(matchPos - inputStart);
+						lzdict8[readHash8(matchPos)].push(matchPos - inputStart);
+					}
+
+					const uint8_t* match = input - distance;
+					while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
+						matchLength++;
+						input--;
+						match--;
+					}
+
 					uint8_t* const controlByte = output++;
 					skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
-					const uint8_t* const matchEnd = input + matchLength;
-					input += testedPositions - lazySteps;
-
-					//If the match is RLE-like, add only the last repetition of the run
-					if (distance < matchLength)
-						input = matchEnd - distance;
-					for (; input != matchEnd; input++) {
-						const size_t ptr = input - inputStart;
-						lzdict4[readHash4(input)].push(ptr);
-						lzdict8[readHash8(input)].push(ptr);
-					}
-
+					input = matchEnd;
 					literalRunStart = input;
-					skanda_encode_match(output, controlByte, matchLength, distance, repOffset);
+					skanda_encode_match(output, controlByte, matchLength, distance, &repOffset);
+
 				}
 			}
 
 			if (progress->abort())
 				return 0;
-			progress->progress(input - lastProgressReport);
+			progress->progress(input - inputStart);
 		}
 
 		uint8_t* const controlByte = output++;
 		skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
 
 
-	template<class IntPtr>
+	template<class IntType>
 	struct SkandaOptimalParserState {
 		//16 high bits store size cost, 16 low bits the speed cost
 		//This way we can also compare both costs prioritising size cost with a single operation
 		uint32_t cost;
 		//Serves as both match distance and rep offset.
-		IntPtr distance;
+		IntType distance;
 		//Literal run length in a certain state can be unbounded, while
 		// match length is limited by "nice length"
-		IntPtr literalRunLength;
-		uint16_t matchLength;
-		uint16_t path;
+		uint16_t literalRunLength;
+		uint8_t matchLength;
+		uint8_t path;
 	};
 
-	template<class IntPtr>
-	LZ_Structure<IntPtr>* skanda_forward_optimal_parse(const uint8_t* const input, const uint8_t* const inputStart,
-		const uint8_t* const limit, HashTableMatchFinder<IntPtr>& matchFinder, SkandaOptimalParserState<IntPtr>* parser,
-		LZ_Structure<IntPtr>* stream, const size_t startLiteralRunLength, const size_t startRepOffset,
-		const CompressorOptions compressorOptions, const size_t window) {
+	template<class IntType>
+	LZ_Structure<IntType>* skanda_forward_optimal_parse(const uint8_t* const input, const uint8_t* const inputStart,
+		const uint8_t* const limit, HashTableMatchFinder<IntType>& matchFinder, SkandaOptimalParserState<IntType>* parser,
+		LZ_Structure<IntType>* stream, const size_t startLiteralRunLength, const size_t startRepOffset,
+		const CompressorOptions compressorOptions, const int window) {
 
-		const size_t blockLength = std::min((size_t)(limit - input), compressorOptions.optimalBlockSize);
+		const size_t blockLength = std::min((size_t)(limit - input), (size_t)compressorOptions.optimalBlockSize);
 		for (size_t i = 1; i <= blockLength; i++)
 			parser[i].cost = UINT32_MAX;
 
@@ -1619,16 +1627,17 @@ namespace skanda {
 
 		parser[0].cost = 0;
 		parser[0].distance = startRepOffset;
-		parser[0].literalRunLength = startLiteralRunLength;
+		//Avoid overflow, we really only care whether it needs an extra byte
+		parser[0].literalRunLength = std::max(startLiteralRunLength, (size_t)7);
 
 		size_t position = 0;
 		for (; position < blockLength; position++) {
 
 			const uint8_t* const inputPosition = input + position;
-			SkandaOptimalParserState<IntPtr>* const parserPosition = parser + position;
+			SkandaOptimalParserState<IntType>* const parserPosition = parser + position;
 
-			const size_t literalCost = parserPosition->cost + (0x10000 << (parserPosition->literalRunLength == 6));  //only size cost
-			SkandaOptimalParserState<IntPtr>* nextPosition = parserPosition + 1;
+			const uint32_t literalCost = parserPosition->cost + (0x10000 << (parserPosition->literalRunLength == 6));  //only size cost
+			SkandaOptimalParserState<IntType>* nextPosition = parserPosition + 1;
 			if (literalCost < nextPosition->cost) {
 				nextPosition->cost = literalCost;
 				nextPosition->distance = parserPosition->distance;
@@ -1637,7 +1646,7 @@ namespace skanda {
 
 			size_t repMatchLength = 0;
 			if (parserPosition->literalRunLength) {
-				size_t repMatchLength = test_match(inputPosition, inputPosition - parserPosition->distance, limit, 2, window);
+				repMatchLength = test_match(inputPosition, inputPosition - parserPosition->distance, limit, 2, window);
 
 				if (repMatchLength) {
 					if (position + repMatchLength >= blockLength || repMatchLength >= compressorOptions.repNiceLength) {
@@ -1646,7 +1655,7 @@ namespace skanda {
 						break;
 					}
 
-					size_t repMatchCost = parserPosition->cost;
+					uint32_t repMatchCost = parserPosition->cost;
 					repMatchCost += 0x10000 << (repMatchLength > 16);  //size cost
 					repMatchCost += 1;  //speed cost
 
@@ -1660,14 +1669,14 @@ namespace skanda {
 				}
 			}
 
-			LZ_Match<IntPtr> matches[16];
-			const LZ_Match<IntPtr>* matchesEnd = matchFinder.find_matches_and_update(inputPosition, inputStart,
+			LZ_Match<IntType> matches[16];
+			const LZ_Match<IntType>* matchesEnd = matchFinder.find_matches_and_update(inputPosition, inputStart,
 				limit, matches, repMatchLength, compressorOptions, window);
 
 			//At least one match was found
 			if (matchesEnd != matches) {
 				//The last match should be the longest
-				const LZ_Match<IntPtr>* const longestMatch = matchesEnd - 1;
+				const LZ_Match<IntType>* const longestMatch = matchesEnd - 1;
 				//Match goes outside the buffer or is very long
 				if (position + longestMatch->length >= blockLength || longestMatch->length >= compressorOptions.standardNiceLength) {
 					lastMatchLength = longestMatch->length;
@@ -1676,12 +1685,12 @@ namespace skanda {
 				}
 
 				const size_t lengthOverflow = parserPosition->literalRunLength ? 17 : 33;
-				for (const LZ_Match<IntPtr>* matchIt = matches; matchIt != matchesEnd; matchIt++) {
+				for (const LZ_Match<IntType>* matchIt = matches; matchIt != matchesEnd; matchIt++) {
 
 					if (matchIt->distance == parserPosition->distance)
 						continue;
 
-					size_t matchCost = parserPosition->cost;
+					uint32_t matchCost = parserPosition->cost;
 					matchCost += (2 + unsafe_int_log2(matchIt->distance) / 7 + (matchIt->length > lengthOverflow)) << 16; //size cost
 					matchCost += 1 + (matchIt->distance > (1 << 20)); //speed cost
 
@@ -1697,8 +1706,8 @@ namespace skanda {
 		}
 
 		// Backward pass, pick best option at each step.
-		const SkandaOptimalParserState<IntPtr>* backwardParse = parser + position;
-		const SkandaOptimalParserState<IntPtr>* const parseEnd = parser;
+		const SkandaOptimalParserState<IntType>* backwardParse = parser + position;
+		const SkandaOptimalParserState<IntType>* const parseEnd = parser;
 
 		if (lastMatchLength) {
 			stream->literalRunLength = 0;
@@ -1728,18 +1737,18 @@ namespace skanda {
 			backwardParse -= backwardParse->literalRunLength;
 			stream++;
 		}
-		(stream - 1)->literalRunLength -= startLiteralRunLength;  //Remove, or it will produce invalid data
+		(stream - 1)->literalRunLength -= std::max(startLiteralRunLength, (size_t)7);  //Remove, or it will produce invalid data
 
 		return stream - 1;
 	}
 
-	template<class IntPtr>
-	LZ_Structure<IntPtr>* skanda_multi_arrivals_parse(const uint8_t* input, const uint8_t* const inputStart, const uint8_t* const limit,
-		BinaryMatchFinder<IntPtr>& matchFinder, SkandaOptimalParserState<IntPtr>* parser, LZ_Structure<IntPtr>* stream,
+	template<class IntType>
+	LZ_Structure<IntType>* skanda_multi_arrivals_parse(const uint8_t* input, const uint8_t* const inputStart, const uint8_t* const limit,
+		BinaryMatchFinder<IntType>& matchFinder, SkandaOptimalParserState<IntType>* parser, LZ_Structure<IntType>* stream,
 		const size_t startLiteralRunLength, const size_t startRepOffset,
-		const CompressorOptions compressorOptions, const size_t window) {
+		const CompressorOptions compressorOptions, const int window) {
 
-		const size_t blockLength = std::min((size_t)(limit - input), compressorOptions.optimalBlockSize - 1);
+		const size_t blockLength = std::min((size_t)(limit - input), (size_t)compressorOptions.optimalBlockSize - 1);
 		for (size_t i = 1; i <= blockLength * compressorOptions.maxArrivals; i++)
 			parser[i].cost = UINT32_MAX;
 
@@ -1750,32 +1759,32 @@ namespace skanda {
 		for (size_t i = 0; i < compressorOptions.maxArrivals; i++) {
 			parser[i].cost = 0;
 			parser[i].distance = startRepOffset;
-			parser[i].literalRunLength = startLiteralRunLength;
+			parser[i].literalRunLength = std::max(startLiteralRunLength, (size_t)7);
 		}
 
 		size_t position = 0;
 		for (; position < blockLength; position++) {
 
 			const uint8_t* inputPosition = input + position;
-			SkandaOptimalParserState<IntPtr>* const parserPosition = parser + position * compressorOptions.maxArrivals;
+			SkandaOptimalParserState<IntType>* const parserPosition = parser + position * compressorOptions.maxArrivals;
 
 			size_t acceptableRepMatchLength = 2;  //Only take rep matches as long as this
 
 			//Literal and rep match parsing can be done at the same time
 			for (size_t i = 0; i < compressorOptions.maxArrivals; i++) {
 
-				SkandaOptimalParserState<IntPtr>* const currentArrival = parserPosition + i;
+				SkandaOptimalParserState<IntType>* const currentArrival = parserPosition + i;
 
-				const size_t literalCost = currentArrival->cost + (0x10000 << (currentArrival->literalRunLength == 6)); //only size cost
-				SkandaOptimalParserState<IntPtr>* arrivalIt = parserPosition + compressorOptions.maxArrivals;
-				SkandaOptimalParserState<IntPtr>* lastArrival = arrivalIt + compressorOptions.maxArrivals;
+				const uint32_t literalCost = currentArrival->cost + (0x10000 << (currentArrival->literalRunLength == 6)); //only size cost
+				SkandaOptimalParserState<IntType>* arrivalIt = parserPosition + compressorOptions.maxArrivals;
+				SkandaOptimalParserState<IntType>* lastArrival = arrivalIt + compressorOptions.maxArrivals;
 
 				for (; arrivalIt < lastArrival; arrivalIt++) {
 
 					if (literalCost < arrivalIt->cost) {
 
-						for (SkandaOptimalParserState<IntPtr>* it = lastArrival - 1; it != arrivalIt; it--)
-							memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState<IntPtr>));
+						for (SkandaOptimalParserState<IntType>* it = lastArrival - 1; it != arrivalIt; it--)
+							memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState<IntType>));
 
 						arrivalIt->cost = literalCost;
 						arrivalIt->matchLength = 1;
@@ -1802,7 +1811,7 @@ namespace skanda {
 						//Small heuristic: instead of testing all positions, only test the maximum match length,
 						// and if it overflows, just before the overflow
 						//There is a notable speed increase for a negligible size penalty
-						size_t repMatchCost = currentArrival->cost;
+						uint32_t repMatchCost = currentArrival->cost;
 						repMatchCost += 0x10000 << (repMatchLength > 16);  //size cost
 						repMatchCost += 1;  //speed cost
 
@@ -1813,8 +1822,8 @@ namespace skanda {
 
 							if (repMatchCost < arrivalIt->cost) {
 
-								for (SkandaOptimalParserState<IntPtr>* it = lastArrival - 1; it != arrivalIt; it--)
-									memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState<IntPtr>));
+								for (SkandaOptimalParserState<IntType>* it = lastArrival - 1; it != arrivalIt; it--)
+									memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState<IntType>));
 
 								arrivalIt->cost = repMatchCost;
 								arrivalIt->matchLength = repMatchLength;
@@ -1834,8 +1843,8 @@ namespace skanda {
 
 										if (repMatchCost < arrivalIt->cost) {
 
-											for (SkandaOptimalParserState<IntPtr>* it = lastArrival - 1; it != arrivalIt; it--)
-												memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState<IntPtr>));
+											for (SkandaOptimalParserState<IntType>* it = lastArrival - 1; it != arrivalIt; it--)
+												memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState<IntType>));
 
 											arrivalIt->cost = repMatchCost;
 											arrivalIt->matchLength = 16;
@@ -1853,50 +1862,74 @@ namespace skanda {
 				}
 			}
 
-			LZ_Match<IntPtr> matches[144];
-			LZ_Match<IntPtr>* matchesEnd = matchFinder.find_matches_and_update(inputPosition, inputStart, limit, matches,
-				std::max((size_t)2, acceptableRepMatchLength - 1), compressorOptions, window);
+			LZ_Match<IntType> matches[144];
+			LZ_Match<IntType>* matchesEnd = matchFinder.find_matches_and_update(inputPosition, inputStart, limit, matches,
+				std::max(acceptableRepMatchLength - 1, (size_t)2), compressorOptions, window);
 
 			if (matchesEnd != matches) {
-				const LZ_Match<IntPtr>* const longestMatch = matchesEnd - 1;
-				if (position + longestMatch->length >= blockLength || longestMatch->length >= compressorOptions.standardNiceLength) {
-					lastMatchLength = longestMatch->length;
-					lastMatchDistance = longestMatch->distance;
-					lastPath = 0;
-					break;
+
+				if (compressorOptions.parserFunction == OPTIMAL_BRUTE) {
+					//Longest length can be anywhere
+					size_t longestLength = 0;
+					size_t distance;
+					for (LZ_Match<IntType>* matchIt = matches; matchIt != matchesEnd; matchIt++) {
+						if (matchIt->length > longestLength) {
+							longestLength = matchIt->length;
+							distance = matchIt->distance;
+						}
+					}
+					if (position + longestLength >= blockLength || longestLength >= compressorOptions.standardNiceLength) {
+						lastMatchLength = longestLength;
+						lastMatchDistance = distance;
+						lastPath = 0;
+						break;
+					}
+				}
+				else {
+					//We have the guarantee that matches are in increasing order
+					const LZ_Match<IntType>* const longestMatch = matchesEnd - 1;
+					if (position + longestMatch->length >= blockLength || longestMatch->length >= compressorOptions.standardNiceLength) {
+						lastMatchLength = longestMatch->length;
+						lastMatchDistance = longestMatch->distance;
+						lastPath = 0;
+						break;
+					}
 				}
 
 				size_t length = 0;
+				bool lengthOverflowTested = false;
 				const size_t lengthOverflow = parserPosition->literalRunLength ? 17 : 33;
 
-				for (LZ_Match<IntPtr>* matchIt = matches; matchIt != matchesEnd; matchIt++) {
+				for (LZ_Match<IntType>* matchIt = matches; matchIt != matchesEnd; matchIt++) {
 
 					if (matchIt->distance == parserPosition->distance)
 						continue;
 
-					size_t matchCost = parserPosition->cost;
+					uint32_t matchCost = parserPosition->cost;
 					matchCost += (2 + unsafe_int_log2(matchIt->distance) / 7) << 16;  //size cost
 					matchCost += 1 + (matchIt->distance > (1 << 20)) * 2;  //speed cost
 
 					do {
 						//If the current match has a length that overflows, and we have not tried any
 						// length just below that overflow, try it
-						if (length < lengthOverflow && matchIt->length > lengthOverflow)
+						if (!lengthOverflowTested && matchIt->length > lengthOverflow) {
 							length = lengthOverflow;
+							lengthOverflowTested = true;
+						}
 						else
 							length = matchIt->length;
 
 						matchCost += (length > lengthOverflow) << 16;
 
-						SkandaOptimalParserState<IntPtr>* arrivalIt = parserPosition + length * compressorOptions.maxArrivals;
-						SkandaOptimalParserState<IntPtr>* const lastArrival = arrivalIt + compressorOptions.maxArrivals;
+						SkandaOptimalParserState<IntType>* arrivalIt = parserPosition + length * compressorOptions.maxArrivals;
+						SkandaOptimalParserState<IntType>* const lastArrival = arrivalIt + compressorOptions.maxArrivals;
 
 						for (; arrivalIt < lastArrival; arrivalIt++) {
 
 							if (matchCost < arrivalIt->cost) {
 
-								for (SkandaOptimalParserState<IntPtr>* it = lastArrival - 1; it != arrivalIt; it--)
-									memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState<IntPtr>));
+								for (SkandaOptimalParserState<IntType>* it = lastArrival - 1; it != arrivalIt; it--)
+									memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState<IntType>));
 
 								arrivalIt->cost = matchCost;
 								arrivalIt->matchLength = length;
@@ -1915,8 +1948,8 @@ namespace skanda {
 	doBackwardParse:
 
 		// Backward pass, pick best option at each step.
-		const SkandaOptimalParserState<IntPtr>* backwardParse = parser + position * compressorOptions.maxArrivals;
-		const SkandaOptimalParserState<IntPtr>* const parseEnd = parser;
+		const SkandaOptimalParserState<IntType>* backwardParse = parser + position * compressorOptions.maxArrivals;
+		const SkandaOptimalParserState<IntType>* const parseEnd = parser;
 		size_t path = 0;
 
 		if (lastMatchLength) {
@@ -1957,14 +1990,13 @@ namespace skanda {
 		return stream - 1;
 	}
 
-	template<class IntPtr>
+	template<class IntType>
 	size_t skanda_compress_optimal(const uint8_t* input, const size_t size, uint8_t* output,
-		ProgressCallback* progress, const size_t window, const CompressorOptions compressorOptions) {
+		ProgressCallback* progress, const int window, const CompressorOptions compressorOptions) {
 
 		const uint8_t* const inputStart = input;
 		const uint8_t* const outputStart = output;
 		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
-		const uint8_t* lastProgressReport;
 
 		//Data for the format
 		size_t repOffset = 1;
@@ -1972,21 +2004,21 @@ namespace skanda {
 		const uint8_t* literalRunStart = input;
 		input++;
 
-		HashTableMatchFinder<IntPtr> hashMatchFinder;
-		BinaryMatchFinder<IntPtr> binaryMatchFinder;
-		SkandaOptimalParserState<IntPtr>* parser = nullptr;
-		LZ_Structure<IntPtr>* stream = nullptr;
+		HashTableMatchFinder<IntType> hashMatchFinder;
+		BinaryMatchFinder<IntType> binaryMatchFinder;
+		SkandaOptimalParserState<IntType>* parser = nullptr;
+		LZ_Structure<IntType>* stream = nullptr;
 
 		try {
 			if (compressorOptions.parserFunction == OPTIMAL_FAST) {
 				hashMatchFinder.init(size, compressorOptions, window);
-				parser = new SkandaOptimalParserState<IntPtr>[(compressorOptions.optimalBlockSize + 1)];
+				parser = new SkandaOptimalParserState<IntType>[(compressorOptions.optimalBlockSize + 1)];
 			}
 			else {
 				binaryMatchFinder.init(size, compressorOptions, window);
-				parser = new SkandaOptimalParserState<IntPtr>[(compressorOptions.optimalBlockSize + 1) * compressorOptions.maxArrivals];
+				parser = new SkandaOptimalParserState<IntType>[(compressorOptions.optimalBlockSize + 1) * compressorOptions.maxArrivals];
 			}
-			stream = new LZ_Structure<IntPtr>[compressorOptions.optimalBlockSize];
+			stream = new LZ_Structure<IntType>[compressorOptions.optimalBlockSize];
 		}
 		catch (const std::bad_alloc& e) {
 			delete[] parser;
@@ -1998,12 +2030,11 @@ namespace skanda {
 
 			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
 				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
-			lastProgressReport = input;
 
 			while (input < nextProgressReport) {
 
-				LZ_Structure<IntPtr>* streamIt;
-				if (compressorOptions.parserFunction == OPTIMAL) {
+				LZ_Structure<IntType>* streamIt;
+				if (compressorOptions.parserFunction >= OPTIMAL) {
 					streamIt = skanda_multi_arrivals_parse(input, inputStart, compressionLimit, binaryMatchFinder,
 						parser, stream, input - literalRunStart, repOffset, compressorOptions, window);
 				}
@@ -2019,13 +2050,26 @@ namespace skanda {
 					if (streamIt == stream)
 						break;
 
+					size_t matchLength = streamIt->matchLength;
+					size_t distance = streamIt->matchDistance;
+
+					//Reps should not need left extension. This also avoids having a rep match 
+					// after a literal run length of 0, which would make the match encoder 
+					// output invalid data.
+					if (distance != repOffset) {
+						const uint8_t* match = input - distance;
+						while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
+							matchLength++;
+							input--;
+							match--;
+						}
+					}
+
 					uint8_t* const controlByte = output++;
 					skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
-					size_t matchLength = streamIt->matchLength;
-					size_t distance = streamIt->matchDistance;
 					input += matchLength;
-					skanda_encode_match(output, controlByte, matchLength, distance, repOffset);
+					skanda_encode_match(output, controlByte, matchLength, distance, &repOffset);
 					literalRunStart = input;
 
 					streamIt--;
@@ -2037,7 +2081,7 @@ namespace skanda {
 				delete[] stream;
 				return 0;
 			}
-			progress->progress(input - lastProgressReport);
+			progress->progress(input - inputStart);
 		}
 
 		delete[] parser;
@@ -2048,7 +2092,7 @@ namespace skanda {
 		skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -2057,21 +2101,22 @@ namespace skanda {
 	const CompressorOptions skandaCompressorLevels[] = {
 		//      Parser        Hash log     Elements per hash     Nice length     Rep nice length      Block size      Max arrivals
 			{ GREEDY_FAST  ,  NOT_USED  ,      NOT_USED       ,    NOT_USED   ,      NOT_USED     ,    NOT_USED     ,   NOT_USED   },
-			{ GREEDY_NORMAL,     17     ,      NOT_USED       ,    NOT_USED   ,      NOT_USED     ,    NOT_USED     ,   NOT_USED   },
-			{ LAZY_NORMAL  ,     17     ,      NOT_USED       ,       16      ,      NOT_USED     ,    NOT_USED     ,   NOT_USED   },
+			{ GREEDY_NORMAL,     16     ,      NOT_USED       ,    NOT_USED   ,      NOT_USED     ,    NOT_USED     ,   NOT_USED   },
+			{ LAZY_NORMAL  ,     16     ,      NOT_USED       ,       16      ,      NOT_USED     ,    NOT_USED     ,   NOT_USED   },
 			{ LAZY_EXTRA   ,     17     ,          1          ,       16      ,      NOT_USED     ,    NOT_USED     ,   NOT_USED   },
 			{ LAZY_EXTRA   ,     18     ,          2          ,       24      ,      NOT_USED     ,    NOT_USED     ,   NOT_USED   },
 			{ OPTIMAL_FAST ,     18     ,          2          ,       24      ,         8         ,      1024       ,   NOT_USED   },
 			{ OPTIMAL_FAST ,     19     ,          3          ,       32      ,         12        ,      1024       ,   NOT_USED   },
 			{ OPTIMAL      ,     22     ,          4          ,       32      ,         16        ,      2048       ,       2      },
-			{ OPTIMAL      ,     24     ,          5          ,       80      ,         40        ,      2048       ,       4      },
-			{ OPTIMAL      ,     26     ,          6          ,       256     ,         128       ,      4096       ,       8      },
+			{ OPTIMAL      ,     24     ,          5          ,       64      ,         32        ,      2048       ,       4      },
+			{ OPTIMAL      ,     26     ,          6          ,       128     ,         64        ,      4096       ,       6      },
+			{ OPTIMAL_BRUTE,     31     ,          7          ,       256     ,         256       ,      8192       ,       16     },
 	};
 
 	size_t skanda_compress(const uint8_t* input, const size_t size, uint8_t* output,
-		const uint8_t level, ProgressCallback* progress, const size_t window) {
+		const int level, ProgressCallback* progress, const int window) {
 
-		if (level > 9)
+		if (level > 10 || level < 0 || window >(IS_64BIT ? 63 : 31) || window < 0)
 			return 0;
 
 		ProgressCallback defaultProgress;
@@ -2084,7 +2129,7 @@ namespace skanda {
 			return size;
 		}
 
-#ifdef COMPRESS_LARGE_BLOCK
+#ifdef IS_64BIT
 		if (size > ((uint64_t)1 << 32)) {
 			if (skandaCompressorLevels[level].parserFunction == GREEDY_FAST)
 				return skanda_compress_ultra_fast<uint64_t>(input, size, output, progress, window);
@@ -2112,45 +2157,49 @@ namespace skanda {
 		return size + size / 128 + 4;
 	}
 
-	template<class IntPtr>
-	size_t skanda_memory_estimator(const size_t size, const size_t window, const uint8_t level) {
+	template<class IntType>
+	size_t skanda_memory_estimator(const size_t size, const int window, const int level) {
 		if (skandaCompressorLevels[level].parserFunction == GREEDY_FAST)
-			return sizeof(IntPtr) << 12;
+			return sizeof(IntType) << 12;
 		if (skandaCompressorLevels[level].parserFunction == GREEDY_NORMAL)
-			return sizeof(IntPtr) << MIN3(int_log2(size) - 3, skandaCompressorLevels[level].maxHashTableSize, window - 3);
+			return sizeof(IntType) << MIN3((int)int_log2(size) - 3, skandaCompressorLevels[level].maxHashTableSize, window - 3);
 		if (skandaCompressorLevels[level].parserFunction == LAZY_NORMAL)
-			return sizeof(IntPtr) << MIN3(int_log2(size) - 3, skandaCompressorLevels[level].maxHashTableSize, window - 3) << 1;
+			return sizeof(IntType) << MIN3((int)int_log2(size) - 3, skandaCompressorLevels[level].maxHashTableSize, window - 3) << 1;
 		if (skandaCompressorLevels[level].parserFunction == LAZY_EXTRA)
 			//Lazy extra uses 2 tables
-			return sizeof(IntPtr) << MIN3(int_log2(size) - 3, skandaCompressorLevels[level].maxHashTableSize, window - 3)
+			return sizeof(IntType) << MIN3((int)int_log2(size) - 3, skandaCompressorLevels[level].maxHashTableSize, window - 3)
 			<< skandaCompressorLevels[level].maxElementsPerHash << 1;
 		if (skandaCompressorLevels[level].parserFunction == OPTIMAL_FAST) {
-			const size_t log2size = MIN3(int_log2(size) - 3, skandaCompressorLevels[level].maxHashTableSize, window - 3);
-			size_t memory = sizeof(IntPtr) << std::min(log2size, (size_t)14);  //hash 3 table
-			memory += sizeof(IntPtr) << log2size << skandaCompressorLevels[level].maxElementsPerHash << 1;  //hash 4 and hash 8 tables
-			memory += sizeof(SkandaOptimalParserState<IntPtr>) * skandaCompressorLevels[level].optimalBlockSize + 1;
-			memory += sizeof(LZ_Structure<IntPtr>) * skandaCompressorLevels[level].optimalBlockSize;
+			const int log2size = MIN3((int)int_log2(size) - 3, skandaCompressorLevels[level].maxHashTableSize, window - 3);
+			size_t memory = sizeof(IntType) << std::min(log2size, 14);  //hash 3 table
+			memory += sizeof(IntType) << log2size << skandaCompressorLevels[level].maxElementsPerHash << 1;  //hash 4 and hash 8 tables
+			memory += sizeof(SkandaOptimalParserState<IntType>) * skandaCompressorLevels[level].optimalBlockSize + 1;
+			memory += sizeof(LZ_Structure<IntType>) * skandaCompressorLevels[level].optimalBlockSize;
 			return memory;
 		}
 		const size_t binaryTreeSize = (size_t)1 << std::min(skandaCompressorLevels[level].maxHashTableSize, window);
 		const size_t totalWindowSize = std::min(size, (size_t)1 << window);
 		const size_t nodeListSize = std::min(binaryTreeSize, size);
-		size_t memory = sizeof(IntPtr) * 2 * nodeListSize;  //binary tree
-		memory += sizeof(IntPtr) << MIN3(int_log2(size) - 3, (size_t)20, window - 3);  //binary node lookup
-		memory += sizeof(IntPtr) << MIN3(int_log2(size) - 3, (size_t)16, window - 3);  //hash 3 table
+		size_t memory = sizeof(IntType) * 2 * nodeListSize;  //binary tree
+		memory += sizeof(IntType) << MIN3((int)int_log2(size) - 3, 20, window - 3);  //binary node lookup
+		memory += sizeof(IntType) << MIN3((int)int_log2(size) - 3, 16, window - 3);  //hash 3 table
 		if (totalWindowSize > nodeListSize)
-			memory += sizeof(IntPtr) << std::max(4, (int)int_log2(totalWindowSize - nodeListSize) - 4) <<
+			memory += sizeof(IntType) << std::max(4, (int)int_log2(totalWindowSize - nodeListSize) - 4) <<
 			(skandaCompressorLevels[level].maxElementsPerHash - 4);  //extra hash 12 table
-		memory += sizeof(SkandaOptimalParserState<IntPtr>) * (skandaCompressorLevels[level].optimalBlockSize + 1) * skandaCompressorLevels[level].maxArrivals;
-		memory += sizeof(LZ_Structure<IntPtr>) * skandaCompressorLevels[level].optimalBlockSize;
+		memory += sizeof(SkandaOptimalParserState<IntType>) * (skandaCompressorLevels[level].optimalBlockSize + 1) * skandaCompressorLevels[level].maxArrivals;
+		memory += sizeof(LZ_Structure<IntType>) * skandaCompressorLevels[level].optimalBlockSize;
 		return memory;
 	}
 
-	size_t skanda_estimate_memory(const size_t size, const uint8_t level, const size_t window) {
+	size_t skanda_estimate_memory(const size_t size, const int level, const int window) {
+
+		if (level > 10 || level < 0 || window >(IS_64BIT ? 63 : 31) || window < 0)
+			return 0;
+
 		if (size <= SKANDA_LAST_BYTES + 1)
 			return 0;
 
-#ifdef COMPRESS_LARGE_BLOCK
+#ifdef IS_64BIT
 		if (size > ((uint64_t)1 << 32))
 			return skanda_memory_estimator<uint64_t>(size, window, level);
 #endif
@@ -2161,17 +2210,13 @@ namespace skanda {
 	const int8_t inc64table[16] = { 0, 0, 0, 1, 4, -1, -2, -3, 4, 4, 4, 4, 4, 4, 4, 4 };
 
 	//Optimized for long matches
-	FORCE_INLINE void copy_match(uint8_t*& dst, const size_t offset, const size_t length) {
+	FORCE_INLINE void copy_match(uint8_t* dst, const size_t offset, const size_t length) {
 
 		uint8_t* const end = dst + length;
 		const uint8_t* src = dst - offset;
 
 		//If the offset is big enough we can perform a faster copy
 		if (offset >= 16) {
-			//Should be translated to some sse/neon or whatever-that-loads-stores-16-bytes instructions
-			memcpy(dst, src, 16);
-			src += 16;
-			dst += 16;
 			do {
 				memcpy(dst, src, 16);
 				memcpy(dst + 16, src + 16, 16);
@@ -2189,10 +2234,9 @@ namespace skanda {
 			memcpy(dst + 4, src, 4);
 			src += inc64table[offset];
 			memcpy(dst + 8, src, 8);
-			memcpy(dst + 16, src + 8, 8);
 
-			dst += 24;
-			src += 16;
+			dst += 16;
+			src += 8;
 			do {
 				memcpy(dst, src, 8);
 				memcpy(dst + 8, src + 8, 8);
@@ -2200,8 +2244,6 @@ namespace skanda {
 				dst += 16;
 			} while (dst < end);
 		}
-
-		dst = end;
 	}
 
 	//For 64bit this wont read more than 10 bytes
@@ -2243,12 +2285,10 @@ namespace skanda {
 
 	FORCE_INLINE size_t decode_length(const uint8_t*& compressed) {
 		size_t length = *compressed++;
-		if (length == 255)
+		if (unlikely(length == 255))
 			length += decode_prefixVarInt(compressed);
 		return length;
 	}
-
-	uint64_t iterations = 0;
 
 	int skanda_decompress(const uint8_t* compressed, const size_t compressedSize, uint8_t* decompressed,
 		const size_t uncompressedSize, ProgressCallback* progress) {
@@ -2274,7 +2314,6 @@ namespace skanda {
 		const uint8_t* const compressedEnd = compressed + compressedSize - SKANDA_LAST_BYTES;
 		const uint8_t* nextProgressReport = (decompressedEnd - decompressed < SKANDA_PROGRESS_REPORT_PERIOD) ?
 			decompressedEnd : decompressed + SKANDA_PROGRESS_REPORT_PERIOD;
-		const uint8_t* lastProgressReport = decompressed;
 
 		size_t distance = 1;
 		size_t length;  //Stores the literal run length and match length
@@ -2296,12 +2335,11 @@ namespace skanda {
 				memcpy(decompressed + 8, compressed + 8, 8);
 				memcpy(decompressed + 16, compressed + 16, 8);
 
-				if (length > 24) {
+				if (unlikely(length > 24)) {
 
 					//We dont have the guarantee that compressedEnd >= compressed
-					if (compressed > compressedEnd || decompressed > decompressedEnd ||
-						compressedEnd - compressed < length ||
-						decompressedEnd - decompressed < length) {
+					if (unlikely(compressed > compressedEnd || decompressed > decompressedEnd ||
+						compressedEnd - compressed < length || decompressedEnd - decompressed < length)) {
 						return -1;
 					}
 
@@ -2324,22 +2362,20 @@ namespace skanda {
 			decompressed += length;
 			compressed += length;
 
-			if (decompressed >= nextProgressReport) {
+			if (unlikely(decompressed >= nextProgressReport)) {
 				if (progress->abort())
 					return 0;
-				progress->progress(decompressed - lastProgressReport);
+				progress->progress(decompressed - decompressedStart);
 
 				nextProgressReport = (decompressedEnd - decompressed < SKANDA_PROGRESS_REPORT_PERIOD) ?
 					decompressedEnd : decompressed + SKANDA_PROGRESS_REPORT_PERIOD;
-				lastProgressReport = decompressed;
 
 				if (decompressed >= decompressedEnd) {
 					//The maximum number of bytes that can be written in a single iteration
 					//(assuming no overflows) is 33 from match and 8(because we write more than needed) from literal run.
 					//As it is less than the end buffer, this check should be enough.
-					if (decompressed > decompressedEnd || compressed > compressedEnd) {
+					if (decompressed > decompressedEnd || compressed > compressedEnd)
 						return -1;
-					}
 					break;
 				}
 			}
@@ -2349,9 +2385,8 @@ namespace skanda {
 			// and this is the last read). That makes a total of 30, which is less than the
 			//end buffer, and so only a check is necessary here. The exception is an overflow in the
 			//literal run, so that needs its own check.
-			if (compressed > compressedEnd) {
+			if (unlikely(compressed > compressedEnd))
 				return -1;
-			}
 
 			//Reuse the last offset
 			if ((token & 0x10) && length) {
@@ -2360,9 +2395,8 @@ namespace skanda {
 				if (length == 15 + SKANDA_REP_MIN_MATCH_LENGTH) {
 					length += decode_length(compressed);
 					//We have the guarantee that decompressed < decompressedEnd, so there is no overflow
-					if (decompressedEnd - decompressed < length) {
+					if (unlikely(decompressedEnd - decompressed < length))
 						return -1;
-					}
 
 					copy_match(decompressed, distance, length);
 				}
@@ -2387,7 +2421,6 @@ namespace skanda {
 						src += inc64table[distance];
 						memcpy(decompressed + 8, src, 8);
 					}
-					decompressed += length;
 				}
 			}
 			else {
@@ -2396,14 +2429,13 @@ namespace skanda {
 				distance = decode_prefixVarInt(compressed);
 
 				//This can only happen with a new distance. decompressed > decompressedStart always, so no overflow
-				if (decompressed - decompressedStart < distance) {
+				if (unlikely(decompressed - decompressedStart < distance))
 					return -1;
-				}
 
 				if (length == lengthOverflow) {
 					length += decode_length(compressed);
 					//We have the guarantee that decompressed < decompressedEnd, so there is no overflow
-					if (decompressedEnd - decompressed < length)
+					if (unlikely(decompressedEnd - decompressed < length))
 						return -1;
 
 					copy_match(decompressed, distance, length);
@@ -2440,9 +2472,10 @@ namespace skanda {
 							decompressed[32] = src[24];
 						}
 					}
-					decompressed += length;
 				}
 			}
+
+			decompressed += length;
 		}
 
 		memcpy(decompressed, compressed, SKANDA_LAST_BYTES);
