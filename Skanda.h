@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm v1.2.0
+ * Skanda Compression Algorithm v1.2.0b
  * Copyright (c) 2022 Carlos de Diego
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -35,19 +35,19 @@ namespace skanda {
 	//window determines the maximum backwards distance the matches can have, as a power of 2.
 	//Larger values can improve compression, but may hurt decode speed if they exceed CPU cache.
 	//Returns the size of the compressed stream or -1 on failure.
-	size_t skanda_compress(const uint8_t* input, const size_t size, uint8_t* output, const int level,
-		ProgressCallback* progress = nullptr, const int window = 20);
+	size_t skanda_compress(const uint8_t* input, size_t size, uint8_t* output, int level = 1,
+		int window = 20, ProgressCallback* progress = nullptr);
 	//Decompresses contents in "compressed" to "decompressed".
 	//You may also pass a pointer to an object with base class ProgressCallback, to track progress.
 	//Returns 0 on success or -1 on failure or corrupted data.
-	int skanda_decompress(const uint8_t* compressed, const size_t compressedSize, uint8_t* decompressed,
-		const size_t uncompressedSize, ProgressCallback* progress = nullptr);
+	int skanda_decompress(const uint8_t* compressed, size_t compressedSize, uint8_t* decompressed,
+		size_t uncompressedSize, ProgressCallback* progress = nullptr);
 
 	//For a given input size, returns a size for the output buffer that is big enough to
 	// contain the compressed stream even if it expands.
-	size_t skanda_compress_bound(const size_t size);
+	size_t skanda_compress_bound(size_t size);
 	//Returns the amount of memory the algorithm will consume on compression.
-	size_t skanda_estimate_memory(const size_t size, const int level, const int window = 20);
+	size_t skanda_estimate_memory(size_t size, int level = 1, int window = 20);
 }
 
 #ifdef SKANDA_IMPLEMENTATION
@@ -787,18 +787,18 @@ namespace skanda {
 				length = front - input;
 				IntType* const nextNode = &nodes[2 * (backPosition & nodeListMask)];
 				if (length > highestLength || (compressorOptions.parserFunction == OPTIMAL_BRUTE && length > 3)) {
+					highestLength = length;
 					matches->distance = front - back;
 					matches->length = length;
 					matches++;
+				}
 
-					if (length >= compressorOptions.standardNiceLength) {
-						*lesserNode = nextNode[0];
-						*greaterNode = nextNode[1];
-						if (inputPosition > nodeListSize && ((size_t)1 << window) > nodeListSize)
-							lzdict12[readHash12(input - nodeListSize)].push(inputPosition - nodeListSize);
-						return matches;
-					}
-					highestLength = length;
+				if (length >= compressorOptions.standardNiceLength || front == limit) {
+					*lesserNode = nextNode[0];
+					*greaterNode = nextNode[1];
+					if (inputPosition > nodeListSize && ((size_t)1 << window) > nodeListSize)
+						lzdict12[readHash12(input - nodeListSize)].push(inputPosition - nodeListSize);
+					return matches;
 				}
 
 				if (*back < *front) {
@@ -1597,7 +1597,6 @@ namespace skanda {
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
 
-
 	template<class IntType>
 	struct SkandaOptimalParserState {
 		//16 high bits store size cost, 16 low bits the speed cost
@@ -2097,7 +2096,7 @@ namespace skanda {
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
 
-	const size_t NOT_USED = -1;
+	const int NOT_USED = -1;
 	const CompressorOptions skandaCompressorLevels[] = {
 		//      Parser        Hash log     Elements per hash     Nice length     Rep nice length      Block size      Max arrivals
 			{ GREEDY_FAST  ,  NOT_USED  ,      NOT_USED       ,    NOT_USED   ,      NOT_USED     ,    NOT_USED     ,   NOT_USED   },
@@ -2113,11 +2112,17 @@ namespace skanda {
 			{ OPTIMAL_BRUTE,     31     ,          7          ,       256     ,         256       ,      8192       ,       16     },
 	};
 
-	size_t skanda_compress(const uint8_t* input, const size_t size, uint8_t* output,
-		const int level, ProgressCallback* progress, const int window) {
+	size_t skanda_compress(const uint8_t* input, size_t size, uint8_t* output,
+		int level, int window, ProgressCallback* progress) {
 
-		if (level > 10 || level < 0 || window >(IS_64BIT ? 63 : 31) || window < 0)
-			return 0;
+		if (level < 0)
+			level = 0;
+		if (level > 10)
+			level = 10;
+		if (window > (IS_64BIT ? 63 : 31))
+			window = (IS_64BIT ? 63 : 31);
+		if (window < 1)
+			window = 1;
 
 		ProgressCallback defaultProgress;
 		if (!progress)
@@ -2153,12 +2158,12 @@ namespace skanda {
 		return skanda_compress_optimal<uint32_t>(input, size, output, progress, window, skandaCompressorLevels[level]);  //optimal levels
 	}
 
-	size_t skanda_compress_bound(const size_t size) {
+	size_t skanda_compress_bound(size_t size) {
 		return size + size / 128 + 4;
 	}
 
 	template<class IntType>
-	size_t skanda_memory_estimator(const size_t size, const int window, const int level) {
+	size_t skanda_memory_estimator(size_t size, int window, int level) {
 		if (skandaCompressorLevels[level].parserFunction == GREEDY_FAST)
 			return sizeof(IntType) << 12;
 		if (skandaCompressorLevels[level].parserFunction == GREEDY_NORMAL)
@@ -2191,10 +2196,16 @@ namespace skanda {
 		return memory;
 	}
 
-	size_t skanda_estimate_memory(const size_t size, const int level, const int window) {
+	size_t skanda_estimate_memory(size_t size, int level, int window) {
 
-		if (level > 10 || level < 0 || window >(IS_64BIT ? 63 : 31) || window < 0)
-			return 0;
+		if (level < 0)
+			level = 0;
+		if (level > 10)
+			level = 10;
+		if (window > (IS_64BIT ? 63 : 31))
+			window = (IS_64BIT ? 63 : 31);
+		if (window < 1)
+			window = 1;
 
 		if (size <= SKANDA_LAST_BYTES + 1)
 			return 0;
@@ -2290,8 +2301,8 @@ namespace skanda {
 		return length;
 	}
 
-	int skanda_decompress(const uint8_t* compressed, const size_t compressedSize, uint8_t* decompressed,
-		const size_t uncompressedSize, ProgressCallback* progress) {
+	int skanda_decompress(const uint8_t* compressed, size_t compressedSize, uint8_t* decompressed,
+		size_t uncompressedSize, ProgressCallback* progress) {
 
 		ProgressCallback defaultProgress;
 		if (!progress)
