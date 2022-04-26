@@ -14,7 +14,7 @@ Then simply add the header file anywhere you need.
 The API is very simple and straightforward. To compress you might do something like this:
 ```cpp
 uint8_t* outputBuf = new uint8_t[skanda::skanda_compress_bound(inputSize)];
-size_t compressedSize = skanda::skanda_compress(inputBuf, inputSize, outputBuf, level);
+size_t compressedSize = skanda::skanda_compress(inputBuf, inputSize, outputBuf);
 if (compressedSize == -1)
   std::cout << "Error while compressing data";
 ```
@@ -29,23 +29,20 @@ If you want to keep track of the progress, you can create a child class from Pro
 ```cpp
 class MyCallback : public skanda::ProgressCallback {
   size_t fileSize;
-  size_t processed;
   
 public:
   MyCallback(size_t _fileSize) {
     fileSize = _fileSize;
-    processed = 0;
   }
   void progress(size_t bytes) {
-    processed += bytes;
-    std::cout << "Current progress: " << processed << "/" << fileSize << "\n";
+    std::cout << "Current progress: " << bytes << "/" << fileSize << "\n";
   }
 }
 
 int main() {
   //...
   MyCallback myCallback(inputSize);
-  size_t compressedSize = skanda::skanda_compress(input, inputSize, output, level, &myCallback);
+  size_t compressedSize = skanda::skanda_compress(input, inputSize, output, level, window, &myCallback);
   //...
 }
 ```
