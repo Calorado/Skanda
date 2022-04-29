@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm v1.2.0b
+ * Skanda Compression Algorithm v1.2.0c
  * Copyright (c) 2022 Carlos de Diego
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -1345,7 +1345,7 @@ namespace skanda {
 				input += lazySteps;
 
 				if (matchLength) {
-					
+
 					//If the match is RLE-like, add only the last repetition of the run
 					const uint8_t* const matchEnd = input + matchLength;
 					const uint8_t* matchPos = distance < matchLength ? matchEnd - distance : input + testedPositions - lazySteps;
@@ -2109,7 +2109,7 @@ namespace skanda {
 			{ OPTIMAL      ,     22     ,          4          ,       32      ,         16        ,      2048       ,       2      },
 			{ OPTIMAL      ,     24     ,          5          ,       64      ,         32        ,      2048       ,       4      },
 			{ OPTIMAL      ,     26     ,          6          ,       128     ,         64        ,      4096       ,       6      },
-			{ OPTIMAL_BRUTE,     31     ,          7          ,       256     ,         256       ,      8192       ,       16     },
+			{ OPTIMAL_BRUTE,     28     ,          7          ,       256     ,         256       ,      8192       ,       16     },
 	};
 
 	size_t skanda_compress(const uint8_t* input, size_t size, uint8_t* output,
