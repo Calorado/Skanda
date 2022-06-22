@@ -1836,7 +1836,7 @@ namespace skanda {
 				}
 			}
 
-			LZMatch<IntType> matches[144];
+			LZMatch<IntType> matches[258];
 			LZMatch<IntType>* matchesEnd = matchFinder->find_matches_and_update(inputPosition, inputStart, limit, matches,
 				std::max(acceptableRepMatchLength - 1, (size_t)2), compressorOptions, window);
 
@@ -2084,7 +2084,7 @@ namespace skanda {
 			{ OPTIMAL      ,     22     ,          4          ,       32      ,      2048       ,       2      },
 			{ OPTIMAL      ,     24     ,          5          ,       64      ,      2048       ,       4      },
 			{ OPTIMAL      ,     26     ,          6          ,       128     ,      4096       ,       6      },
-			{ OPTIMAL_BRUTE,     30     ,          9          ,       1024    ,      8192       ,       16     },
+			{ OPTIMAL_BRUTE,     30     ,          8          ,       1024    ,      8192       ,       16     },
 	};
 
 	size_t skanda_compress(const uint8_t* input, size_t size, uint8_t* output,
