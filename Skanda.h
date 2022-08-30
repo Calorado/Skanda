@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm v1.3.3
+ * Skanda Compression Algorithm v1.3.4
  * Copyright (c) 2022 Carlos de Diego
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -1667,7 +1667,7 @@ namespace skanda {
 				}
 			}
 
-			LZMatch<IntType> matches[16];
+			LZMatch<IntType> matches[17];
 			const LZMatch<IntType>* matchesEnd = matchFinder->find_matches_and_update(inputPosition, inputStart,
 				limit, matches, 2, compressorOptions, window);
 
@@ -1908,7 +1908,6 @@ namespace skanda {
 					}
 				}
 
-				size_t length = 0;
 				bool lengthOverflowTested = false;
 				const size_t lengthOverflow = parserPosition->literalRunLength ? 17 : 33;
 
@@ -1918,41 +1917,52 @@ namespace skanda {
 						continue;
 
 					size_t matchCost = parserPosition->cost;
-					matchCost += (2 + (unsafe_int_log2(matchIt->distance) + 2) / 8) << 16;  //size cost
+					matchCost += (2 + (unsafe_int_log2(matchIt->distance) + 2) / 8 + (matchIt->length > lengthOverflow)) << 16;  //size cost
 					matchCost += 1 + (matchIt->distance > (1 << 20)) * 2;  //speed cost
 
-					do {
-						//If the current match has a length that overflows, and we have not tried any
-						// length just below that overflow, try it
-						if (!lengthOverflowTested && matchIt->length > lengthOverflow) {
-							length = lengthOverflow;
-							lengthOverflowTested = true;
-						}
-						else
-							length = matchIt->length;
+					SkandaOptimalParserState* arrivalIt = parserPosition + matchIt->length * compressorOptions.maxArrivals;
+					SkandaOptimalParserState* lastArrival = arrivalIt + compressorOptions.maxArrivals;
 
-						matchCost += (length > lengthOverflow) << 16;
+					for (; arrivalIt < lastArrival; arrivalIt++) {
 
-						SkandaOptimalParserState* arrivalIt = parserPosition + length * compressorOptions.maxArrivals;
-						SkandaOptimalParserState* const lastArrival = arrivalIt + compressorOptions.maxArrivals;
+						if (matchCost < arrivalIt->cost) {
 
-						for (; arrivalIt < lastArrival; arrivalIt++) {
+							for (SkandaOptimalParserState* it = lastArrival - 1; it != arrivalIt; it--)
+								memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState));
 
-							if (matchCost < arrivalIt->cost) {
+							arrivalIt->cost = matchCost;
+							arrivalIt->matchLength = matchIt->length;
+							arrivalIt->distance = matchIt->distance;
+							arrivalIt->literalRunLength = 0;
+							arrivalIt->path = 0;
 
-								for (SkandaOptimalParserState* it = lastArrival - 1; it != arrivalIt; it--)
-									memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState));
+							//If the current match has a length that overflows, and we have not tried any
+							// length just below that overflow, try it
+							if (!lengthOverflowTested && matchIt->length > lengthOverflow) {
+								matchCost--; //Remove length overflow cost
+								arrivalIt = parserPosition + lengthOverflow * compressorOptions.maxArrivals;
+								lastArrival = arrivalIt + compressorOptions.maxArrivals;
 
-								arrivalIt->cost = matchCost;
-								arrivalIt->matchLength = length;
-								arrivalIt->distance = matchIt->distance;
-								arrivalIt->literalRunLength = 0;
-								arrivalIt->path = 0;
-								break;
+								for (; arrivalIt < lastArrival; arrivalIt++) {
+
+									if (matchCost < arrivalIt->cost) {
+
+										for (SkandaOptimalParserState* it = lastArrival - 1; it != arrivalIt; it--)
+											memcpy(&it[0], &it[-1], sizeof(SkandaOptimalParserState));
+
+										arrivalIt->cost = matchCost;
+										arrivalIt->matchLength = lengthOverflow;
+										arrivalIt->distance = matchIt->distance;
+										arrivalIt->literalRunLength = 0;
+										arrivalIt->path = 0;
+										break;
+									}
+								}
 							}
+							break;
 						}
-
-					} while (length != matchIt->length);
+					}
+					lengthOverflowTested = matchIt->length >= lengthOverflow;
 				}
 			}
 		}
@@ -2070,11 +2080,10 @@ namespace skanda {
 					size_t matchLength = streamIt->matchLength;
 					size_t distance = streamIt->matchDistance;
 
+					//Perform left match expansion. This helps even with the binary tree match finder.
 					//Reps should not need left extension. This also avoids having a rep match 
 					// after a literal run length of 0, which would make the match encoder 
 					// output invalid data.
-					//Fast optimal parser already does left extension, 
-					// but leaving this here still improves compression. Why?
 					if (distance != repOffset) {
 						const uint8_t* match = input - distance;
 						while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
