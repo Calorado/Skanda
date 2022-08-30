@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm v1.3.2
+ * Skanda Compression Algorithm v1.3.3
  * Copyright (c) 2022 Carlos de Diego
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -1533,7 +1533,7 @@ namespace skanda {
 					input++;
 					uint8_t* const controlByte = output++;
 					skanda_encode_literal_run(input, literalRunStart, controlByte, output);
-					
+
 					lzdict4[read_hash4(input + 0)].push(input + 0 - inputStart);
 					lzdict8[read_hash8(input + 0)].push(input + 0 - inputStart);
 					lzdict4[read_hash4(input + 1)].push(input + 1 - inputStart);
@@ -1611,11 +1611,10 @@ namespace skanda {
 	template<class IntType>
 	LZStructure<IntType>* skanda_forward_optimal_parse(const uint8_t* const input, const uint8_t* const inputStart,
 		const uint8_t* const limit, HashTableMatchFinder<IntType>* matchFinder, SkandaOptimalParserState* parser,
-		LZStructure<IntType>* stream, const size_t startLiteralRunLength, const size_t startRepOffset,
-		const CompressorOptions& compressorOptions, const int window) {
+		LZStructure<IntType>* stream, const size_t startRepOffset, const CompressorOptions& compressorOptions, const int window) {
 
 		const size_t blockLength = std::min((size_t)(limit - input), (size_t)compressorOptions.optimalBlockSize);
-		for (size_t i = 1; i <= blockLength; i++)
+		for (size_t i = 1; i < blockLength + 1; i++)
 			parser[i].cost = UINT32_MAX;
 
 		size_t lastMatchLength = 0;
@@ -1623,8 +1622,7 @@ namespace skanda {
 
 		parser[0].cost = 0;
 		parser[0].distance = startRepOffset;
-		//Avoid overflow, we really only care whether it needs an extra byte
-		parser[0].literalRunLength = std::max(startLiteralRunLength, (size_t)7);
+		parser[0].literalRunLength = 0;
 
 		size_t position = 0;
 		for (; position < blockLength; position++) {
@@ -1640,9 +1638,8 @@ namespace skanda {
 				nextPosition->literalRunLength = parserPosition->literalRunLength + 1;
 			}
 
-			size_t repMatchLength = 0;
 			if (parserPosition->literalRunLength) {
-				repMatchLength = test_match(inputPosition, inputPosition - parserPosition->distance, limit, 2, window);
+				size_t repMatchLength = test_match(inputPosition, inputPosition - parserPosition->distance, limit, 2, window);
 
 				if (repMatchLength) {
 					//Rep matches can be unconditionally taken with lower lengths
@@ -1652,7 +1649,7 @@ namespace skanda {
 						break;
 					}
 
-					uint32_t repMatchCost = parserPosition->cost;
+					size_t repMatchCost = parserPosition->cost;
 					repMatchCost += 0x10000 << (repMatchLength > 16);  //size cost
 					repMatchCost += 1;  //speed cost
 
@@ -1663,12 +1660,16 @@ namespace skanda {
 						nextPosition->distance = parserPosition->distance;
 						nextPosition->literalRunLength = 0;
 					}
+					
+					//Skip if a rep match is found
+					matchFinder->update_position(inputPosition, inputStart);
+					continue;
 				}
 			}
 
 			LZMatch<IntType> matches[16];
 			const LZMatch<IntType>* matchesEnd = matchFinder->find_matches_and_update(inputPosition, inputStart,
-				limit, matches, repMatchLength, compressorOptions, window);
+				limit, matches, 2, compressorOptions, window);
 
 			//At least one match was found
 			if (matchesEnd != matches) {
@@ -1681,20 +1682,37 @@ namespace skanda {
 					break;
 				}
 
+				//For match left extension: do not go beyond the beginning of this parser cycle
+				const uint8_t* const literalRunStart = inputPosition - std::min((size_t)parserPosition->literalRunLength, position);
 				const size_t lengthOverflow = parserPosition->literalRunLength ? 17 : 33;
-				for (const LZMatch<IntType>* matchIt = matches; matchIt != matchesEnd; matchIt++) {
+				for (const LZMatch<IntType>* matchIt = longestMatch; matchIt >= matches; matchIt--) {
 
-					uint32_t matchCost = parserPosition->cost;
-					matchCost += ((unsafe_int_log2(matchIt->distance) + 18) / 8 + (matchIt->length > lengthOverflow)) << 16; //size cost
+					//Perform left match extension
+					size_t matchLength = matchIt->length;
+					const uint8_t* leftExtension = inputPosition;
+					SkandaOptimalParserState* prevState = parserPosition;
+					const uint8_t* match = inputPosition - matchIt->distance;
+					while (leftExtension > literalRunStart && match > inputStart && leftExtension[-1] == match[-1]) {
+						prevState--;
+						matchLength++;
+						leftExtension--;
+						match--;
+					}
+
+					size_t matchCost = prevState->cost;
+					matchCost += (2 + (unsafe_int_log2(matchIt->distance) + 2) / 8 + (matchLength > lengthOverflow)) << 16; //size cost
 					matchCost += 1 + (matchIt->distance > (1 << 20)); //speed cost
 
-					nextPosition = parserPosition + matchIt->length;
+					nextPosition = prevState + matchLength;
 					if (matchCost < nextPosition->cost) {
 						nextPosition->cost = matchCost;
-						nextPosition->matchLength = matchIt->length;
+						nextPosition->matchLength = matchLength;
 						nextPosition->distance = matchIt->distance;
 						nextPosition->literalRunLength = 0;
 					}
+					//If this match does not help, the shorter ones probably wont
+					else 
+						break;
 				}
 			}
 		}
@@ -1732,7 +1750,6 @@ namespace skanda {
 			backwardParse -= backwardParse->literalRunLength;
 			stream++;
 		}
-		(stream - 1)->literalRunLength -= std::max(startLiteralRunLength, (size_t)7);  //Remove, or it will produce invalid data
 
 		return stream - 1;
 	}
@@ -1740,11 +1757,10 @@ namespace skanda {
 	template<class IntType>
 	LZStructure<IntType>* skanda_multi_arrivals_parse(const uint8_t* input, const uint8_t* const inputStart, const uint8_t* const limit,
 		BinaryMatchFinder<IntType>* matchFinder, SkandaOptimalParserState* parser, LZStructure<IntType>* stream,
-		const size_t startLiteralRunLength, const size_t startRepOffset,
-		const CompressorOptions& compressorOptions, const int window) {
+		const size_t startRepOffset, const CompressorOptions& compressorOptions, const int window) {
 
 		const size_t blockLength = std::min((size_t)(limit - input), (size_t)compressorOptions.optimalBlockSize - 1);
-		for (size_t i = 1; i <= blockLength * compressorOptions.maxArrivals; i++)
+		for (size_t i = 0; i < (blockLength + 1) * compressorOptions.maxArrivals; i++)
 			parser[i].cost = UINT32_MAX;
 
 		size_t lastMatchLength = 0;
@@ -1754,7 +1770,7 @@ namespace skanda {
 		for (size_t i = 0; i < compressorOptions.maxArrivals; i++) {
 			parser[i].cost = 0;
 			parser[i].distance = startRepOffset;
-			parser[i].literalRunLength = std::max(startLiteralRunLength, (size_t)7);
+			parser[i].literalRunLength = 0;
 		}
 
 		size_t position = 0;
@@ -1807,7 +1823,7 @@ namespace skanda {
 						//Small heuristic: instead of testing all positions, only test the maximum match length,
 						// and if it overflows, just before the overflow
 						//There is a notable speed increase for a negligible size penalty
-						uint32_t repMatchCost = currentArrival->cost;
+						size_t repMatchCost = currentArrival->cost;
 						repMatchCost += 0x10000 << (repMatchLength > 16);  //size cost
 						repMatchCost += 1;  //speed cost
 
@@ -1901,8 +1917,8 @@ namespace skanda {
 					if (matchIt->distance == parserPosition->distance)
 						continue;
 
-					uint32_t matchCost = parserPosition->cost;
-					matchCost += ((18 + unsafe_int_log2(matchIt->distance)) / 8) << 16;  //size cost
+					size_t matchCost = parserPosition->cost;
+					matchCost += (2 + (unsafe_int_log2(matchIt->distance) + 2) / 8) << 16;  //size cost
 					matchCost += 1 + (matchIt->distance > (1 << 20)) * 2;  //speed cost
 
 					do {
@@ -1960,9 +1976,9 @@ namespace skanda {
 			//Update only the last positions. This mainly helps when there are long matches
 			const uint8_t* const matchEnd = input + position + lastMatchLength;
 			const uint8_t* inputPosition;
-			if (compressorOptions.parserFunction == OPTIMAL_BRUTE) 
+			if (compressorOptions.parserFunction == OPTIMAL_BRUTE)
 				inputPosition = input + position;
-			else 
+			else
 				inputPosition = matchEnd - std::min((size_t)compressorOptions.niceLength / 4, lastMatchLength) + 1;
 			for (; inputPosition < matchEnd; inputPosition++)
 				matchFinder->update_position(inputPosition, inputStart, limit, compressorOptions, window);
@@ -2013,7 +2029,7 @@ namespace skanda {
 		try {
 			if (compressorOptions.parserFunction == OPTIMAL_FAST) {
 				hashMatchFinder.init(size, compressorOptions, window);
-				parser = new SkandaOptimalParserState[(compressorOptions.optimalBlockSize + 1)];
+				parser = new SkandaOptimalParserState[compressorOptions.optimalBlockSize + 1];
 			}
 			else {
 				binaryMatchFinder.init(size, compressorOptions, window);
@@ -2037,11 +2053,11 @@ namespace skanda {
 				LZStructure<IntType>* streamIt;
 				if (compressorOptions.parserFunction >= OPTIMAL) {
 					streamIt = skanda_multi_arrivals_parse(input, inputStart, compressionLimit, &binaryMatchFinder,
-						parser, stream, input - literalRunStart, repOffset, compressorOptions, window);
+						parser, stream, repOffset, compressorOptions, window);
 				}
 				else {
 					streamIt = skanda_forward_optimal_parse(input, inputStart, compressionLimit, &hashMatchFinder,
-						parser, stream, input - literalRunStart, repOffset, compressorOptions, window);
+						parser, stream, repOffset, compressorOptions, window);
 				}
 
 				//Main compression loop
@@ -2057,6 +2073,8 @@ namespace skanda {
 					//Reps should not need left extension. This also avoids having a rep match 
 					// after a literal run length of 0, which would make the match encoder 
 					// output invalid data.
+					//Fast optimal parser already does left extension, 
+					// but leaving this here still improves compression. Why?
 					if (distance != repOffset) {
 						const uint8_t* match = input - distance;
 						while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
@@ -2180,7 +2198,7 @@ namespace skanda {
 			const int log2size = MIN3((int)int_log2(size) - 3, skandaCompressorLevels[level].maxHashTableSize, window - 3);
 			size_t memory = sizeof(IntType) << std::min(log2size, 14);  //hash 3 table
 			memory += sizeof(IntType) << log2size << skandaCompressorLevels[level].maxElementsPerHash << 1;  //hash 4 and hash 8 tables
-			memory += sizeof(SkandaOptimalParserState) * skandaCompressorLevels[level].optimalBlockSize + 1;
+			memory += sizeof(SkandaOptimalParserState) * (skandaCompressorLevels[level].optimalBlockSize + 1);
 			memory += sizeof(LZStructure<IntType>) * skandaCompressorLevels[level].optimalBlockSize;
 			return memory;
 		}
