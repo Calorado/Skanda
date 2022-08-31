@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm v1.3.4
+ * Skanda Compression Algorithm v1.3.5
  * Copyright (c) 2022 Carlos de Diego
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -1624,13 +1624,21 @@ namespace skanda {
 		parser[0].distance = startRepOffset;
 		parser[0].literalRunLength = 0;
 
+		size_t skipPos = 0;  //Skip match finding while this is >0
 		size_t position = 0;
 		for (; position < blockLength; position++) {
 
-			const uint8_t* const inputPosition = input + position;
+			const uint8_t* inputPosition = input + position;
 			SkandaOptimalParserState* const parserPosition = parser + position;
 
-			const uint32_t literalCost = parserPosition->cost + (0x10000 << (parserPosition->literalRunLength == 6));  //only size cost
+			//From Zstd: skip unpromising position
+			if (parserPosition[1].cost <= parserPosition[0].cost) {
+				skipPos -= skipPos > 0;
+				matchFinder->update_position(inputPosition, inputStart);
+				continue;
+			}
+
+			const size_t literalCost = parserPosition->cost + (0x10000 << (parserPosition->literalRunLength == 6));  //only size cost
 			SkandaOptimalParserState* nextPosition = parserPosition + 1;
 			if (literalCost < nextPosition->cost) {
 				nextPosition->cost = literalCost;
@@ -1638,12 +1646,19 @@ namespace skanda {
 				nextPosition->literalRunLength = parserPosition->literalRunLength + 1;
 			}
 
+			if (skipPos) {
+				skipPos -= skipPos > 0;
+				matchFinder->update_position(inputPosition, inputStart);
+				continue;
+			}
+
+			size_t repMatchLength = 0;
 			if (parserPosition->literalRunLength) {
-				size_t repMatchLength = test_match(inputPosition, inputPosition - parserPosition->distance, limit, 2, window);
+				repMatchLength = test_match(inputPosition, inputPosition - parserPosition->distance, limit, 2, window);
 
 				if (repMatchLength) {
 					//Rep matches can be unconditionally taken with lower lengths
-					if (position + repMatchLength >= blockLength || repMatchLength >= compressorOptions.niceLength / 2) {
+					if (position + repMatchLength > blockLength || repMatchLength >= compressorOptions.niceLength / 2) {
 						lastMatchLength = repMatchLength;
 						lastMatchDistance = parserPosition->distance;
 						break;
@@ -1660,29 +1675,28 @@ namespace skanda {
 						nextPosition->distance = parserPosition->distance;
 						nextPosition->literalRunLength = 0;
 					}
-					
-					//Skip if a rep match is found
-					matchFinder->update_position(inputPosition, inputStart);
-					continue;
+
+					//Skip the next positions if a rep match is found, but not the current
+					//This has a surprisingly small impact on ratio
+					skipPos = repMatchLength - 1;
 				}
 			}
 
 			LZMatch<IntType> matches[17];
 			const LZMatch<IntType>* matchesEnd = matchFinder->find_matches_and_update(inputPosition, inputStart,
-				limit, matches, 2, compressorOptions, window);
+				limit, matches, repMatchLength + 1, compressorOptions, window);
 
 			//At least one match was found
 			if (matchesEnd != matches) {
 				//The last match should be the longest
 				const LZMatch<IntType>* const longestMatch = matchesEnd - 1;
 				//Match goes outside the buffer or is very long
-				if (position + longestMatch->length >= blockLength || longestMatch->length >= compressorOptions.niceLength) {
+				if (position + longestMatch->length > blockLength || longestMatch->length >= compressorOptions.niceLength) {
 					lastMatchLength = longestMatch->length;
 					lastMatchDistance = longestMatch->distance;
 					break;
 				}
-
-				//For match left extension: do not go beyond the beginning of this parser cycle
+				//For left match extension: do not go beyond the beginning of this parser cycle
 				const uint8_t* const literalRunStart = inputPosition - std::min((size_t)parserPosition->literalRunLength, position);
 				const size_t lengthOverflow = parserPosition->literalRunLength ? 17 : 33;
 				for (const LZMatch<IntType>* matchIt = longestMatch; matchIt >= matches; matchIt--) {
@@ -1711,7 +1725,7 @@ namespace skanda {
 						nextPosition->literalRunLength = 0;
 					}
 					//If this match does not help, the shorter ones probably wont
-					else 
+					else
 						break;
 				}
 			}
@@ -1812,7 +1826,7 @@ namespace skanda {
 					// should be at least as long as the best found so far
 					if (repMatchLength >= acceptableRepMatchLength) {
 						//Rep matches can be unconditionally taken with lower lengths
-						if (position + repMatchLength >= blockLength || repMatchLength >= compressorOptions.niceLength / 2) {
+						if (position + repMatchLength > blockLength || repMatchLength >= compressorOptions.niceLength / 2) {
 							lastMatchLength = repMatchLength;
 							lastMatchDistance = currentArrival->distance;
 							lastPath = i;
@@ -1890,7 +1904,7 @@ namespace skanda {
 							distance = matchIt->distance;
 						}
 					}
-					if (position + longestLength >= blockLength || longestLength >= compressorOptions.niceLength) {
+					if (position + longestLength > blockLength || longestLength >= compressorOptions.niceLength) {
 						lastMatchLength = longestLength;
 						lastMatchDistance = distance;
 						lastPath = 0;
@@ -1900,7 +1914,7 @@ namespace skanda {
 				else {
 					//We have the guarantee that matches are in increasing order
 					const LZMatch<IntType>* const longestMatch = matchesEnd - 1;
-					if (position + longestMatch->length >= blockLength || longestMatch->length >= compressorOptions.niceLength) {
+					if (position + longestMatch->length > blockLength || longestMatch->length >= compressorOptions.niceLength) {
 						lastMatchLength = longestMatch->length;
 						lastMatchDistance = longestMatch->distance;
 						lastPath = 0;
