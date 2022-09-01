@@ -1647,7 +1647,7 @@ namespace skanda {
 			}
 
 			if (skipPos) {
-				skipPos -= skipPos > 0;
+				skipPos--;
 				matchFinder->update_position(inputPosition, inputStart);
 				continue;
 			}
@@ -1800,7 +1800,7 @@ namespace skanda {
 
 				SkandaOptimalParserState* const currentArrival = parserPosition + i;
 
-				const uint32_t literalCost = currentArrival->cost + (0x10000 << (currentArrival->literalRunLength == 6)); //only size cost
+				const size_t literalCost = currentArrival->cost + (0x10000 << (currentArrival->literalRunLength == 6)); //only size cost
 				SkandaOptimalParserState* arrivalIt = parserPosition + compressorOptions.maxArrivals;
 				SkandaOptimalParserState* lastArrival = arrivalIt + compressorOptions.maxArrivals;
 
