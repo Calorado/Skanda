@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm v1.3.5
+ * Skanda Compression Algorithm v1.3.6
  * Copyright (c) 2022 Carlos de Diego
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -613,7 +613,7 @@ namespace skanda {
 					matches++;
 
 					highestLength = length;
-					if (highestLength > compressorOptions.niceLength) {
+					if (highestLength >= compressorOptions.niceLength) {
 						chain3 = input - inputStart;
 						chain4.push(input - inputStart);
 						chain8.push(input - inputStart);
@@ -672,7 +672,7 @@ namespace skanda {
 						matches++;
 
 						highestLength = length;
-						if (highestLength > compressorOptions.niceLength) {
+						if (highestLength >= compressorOptions.niceLength) {
 							while (!chain8.ended())
 								chain8.next(&pos);
 							break;
@@ -1016,7 +1016,7 @@ namespace skanda {
 
 		//Constants for this encoder
 		const size_t hashTableSize = 12;
-		const size_t accelerationThreshold = 4;
+		const size_t accelerationThreshold = 3;
 		const size_t accelerationMax = 32;
 
 		const uint8_t* const inputStart = input;
@@ -1049,12 +1049,30 @@ namespace skanda {
 
 			while (likely(input < nextProgressReport)) {
 
+				//First try to find a rep match. Doing it at position +1 gives better results.
+				//If one is found simply take it and skip normal match finding.
+				size_t matchLength = test_match(input + 1, input + 1 - repOffset, compressionLimit, 3, window);
+				if (matchLength) {
+
+					input++;
+					uint8_t* const controlByte = output++;
+					skanda_encode_literal_run(input, literalRunStart, controlByte, output);
+					//Add the position of the match to the hash table
+					lzdict[read_hash5(input)] = input - inputStart;
+
+					input += matchLength;
+					literalRunStart = input;
+					skanda_encode_rep_match(output, controlByte, matchLength);
+					acceleration = 1 << accelerationThreshold;
+					continue;
+				}
+
 				//Get possible match location and update the table
 				IntType* const dictEntry = &lzdict[read_hash5(input)];
 				const uint8_t* match = inputStart + *dictEntry;
 				*dictEntry = input - inputStart;
 				//Try to find a match
-				size_t matchLength = test_match(input, match, compressionLimit, 5, window);
+				matchLength = test_match(input, match, compressionLimit, 5, window);
 
 				//Have we found a match?
 				if (matchLength) {
@@ -1077,7 +1095,7 @@ namespace skanda {
 					input += matchLength;
 					literalRunStart = input;
 					//Output the match
-					skanda_encode_match(output, controlByte, matchLength, distance, &repOffset);
+					skanda_encode_normal_match(output, controlByte, matchLength, distance, &repOffset);
 
 					acceleration = 1 << accelerationThreshold;
 				}
@@ -1257,7 +1275,9 @@ namespace skanda {
 		dictEntry.first(&pos);
 		where = inputStart + pos;
 		if (*(input + *bestMatchLength) == *(where + *bestMatchLength)) {
-			const size_t length = test_match(input, where, limit, 5, window);
+			//Since these matches must be at least one byte longer, 
+			// we can pass as minimum length 6
+			const size_t length = test_match(input, where, limit, 6, window);
 			if (length > *bestMatchLength) {
 				*bestMatchDistance = input - where;
 				*bestMatchLength = length;
@@ -1273,7 +1293,7 @@ namespace skanda {
 		dictEntry.second(&pos);
 		where = inputStart + pos;
 		if (*(input + *bestMatchLength) == *(where + *bestMatchLength)) {
-			const size_t length = test_match(input, where, limit, 5, window);
+			const size_t length = test_match(input, where, limit, 6, window);
 			if (length > *bestMatchLength) {
 				*bestMatchDistance = input - where;
 				*bestMatchLength = length;
@@ -1339,10 +1359,10 @@ namespace skanda {
 
 				if (matchLength) {
 
-					//Add the last 16 positions
+					//Add the last positions
 					const uint8_t* const matchEnd = input + matchLength;
 					const uint8_t* const updateStart = input + testedPositions - lazySteps;
-					const uint8_t* matchPos = std::max(updateStart, matchEnd - std::min(matchLength, (size_t)16));
+					const uint8_t* matchPos = std::max(updateStart, matchEnd - std::min(matchLength, (size_t)compressorOptions.niceLength / 2));
 					for (; matchPos != matchEnd; matchPos++)
 						lzdict[read_hash5(matchPos)].push_in_first(matchPos - inputStart);
 
@@ -1385,22 +1405,22 @@ namespace skanda {
 
 		LZCacheBucket<IntType> chain4 = (*lzdict4)[read_hash4(input)];
 		LZCacheBucket<IntType> chain8 = (*lzdict8)[read_hash8(input)];
-		size_t pos = input - inputStart;
 		*lazySteps = 0;
 		*testedPositions = 1;
-		size_t bestMatchCost = 0;
 		size_t length;
+		size_t bestMatchCost = 0;
 
-		//If no rep offset was found try to get a length 8 match
-		while (!chain8.ended()) {
-			chain8.next(&pos);
+		//First try to find a length 4 match
+		size_t pos = input - inputStart;
+		while (!chain4.ended()) {
+			chain4.next(&pos);
 
 			const uint8_t* where = inputStart + pos;
 
 			if (*(input + *bestLength) != *(where + *bestLength))
 				continue;
 
-			length = test_match(input, where, limit, 8, window);
+			length = test_match(input, where, limit, 4, window);
 
 			size_t distance = input - where;
 			size_t matchCost = 2 + (unsafe_int_log2(distance) + 2) / 8;
@@ -1409,28 +1429,32 @@ namespace skanda {
 				*bestLength = length;
 				bestMatchCost = matchCost;
 
-				if (*bestLength >= compressorOptions.niceLength) {
-					while (!chain8.ended())
-						chain8.next(&pos);
-					chain4.push(input - inputStart);
-					return;
+				//The next length would be 8+, so go to the hash 8 chain
+				if (*bestLength >= 7) {
+					while (!chain4.ended())
+						chain4.next(&pos);
+					if (*bestLength >= compressorOptions.niceLength) {
+						chain8.push(input - inputStart);
+						return;
+					}
+					break;
 				}
 			}
 		}
 
-		//If still nothing was found, try a length 4
-		if (*bestLength < 8) {
+		//Only test length 8 if at least one match was found
+		if (*bestLength >= 4) {
 
 			pos = input - inputStart;
-			while (!chain4.ended()) {
-				chain4.next(&pos);
+			while (!chain8.ended()) {
+				chain8.next(&pos);
 
 				const uint8_t* where = inputStart + pos;
 
 				if (*(input + *bestLength) != *(where + *bestLength))
 					continue;
 
-				length = test_match(input, where, limit, 4, window);
+				length = test_match(input, where, limit, 8, window);
 
 				size_t distance = input - where;
 				size_t matchCost = 2 + (unsafe_int_log2(distance) + 2) / 8;
@@ -1438,26 +1462,19 @@ namespace skanda {
 					*bestDistance = distance;
 					*bestLength = length;
 					bestMatchCost = matchCost;
-					//We did not found any length 8 earlier, so we wont find anything better than 7 now
-					if (*bestLength >= 7) {
-						if (*bestLength >= compressorOptions.niceLength) {
-							while (!chain4.ended())
-								chain4.next(&pos);
-							return;
-						}
-						break;
+
+					if (*bestLength >= compressorOptions.niceLength) {
+						while (!chain8.ended())
+							chain8.next(&pos);
+						return;
 					}
 				}
 			}
-
-			//No match found, code a literal and retry
-			if (*bestLength == 0) {
-				*lazySteps = 1;
-				return;
-			}
 		}
 		else {
-			chain4.push(input - inputStart);
+			//No match found, code a literal and retry
+			*lazySteps = 1;
+			return;
 		}
 
 		//Now try to get a better match at pos + 1
@@ -1484,13 +1501,46 @@ namespace skanda {
 				*bestDistance = distance;
 				*bestLength = length;
 				*lazySteps = 1;
+				bestMatchCost = matchCost;
 
 				if (*bestLength >= compressorOptions.niceLength) {
 					while (!chain8.ended())
 						chain8.next(&pos);
 					return;
 				}
+			}
+		}
+
+		//Now get an even better match at pos + 2
+		input++;
+		pos = input - inputStart;
+		(*lzdict4)[read_hash4(input)].push(pos);
+		chain8 = (*lzdict8)[read_hash8(input)];
+		*testedPositions = 3;
+
+		while (!chain8.ended()) {
+			chain8.next(&pos);
+
+			const uint8_t* where = inputStart + pos;
+
+			if (*(input + *bestLength) != *(where + *bestLength))
+				continue;
+
+			length = test_match(input, where, limit, 8, window);
+
+			size_t distance = input - where;
+			size_t matchCost = 2 + (unsafe_int_log2(distance) + 2) / 8;
+			if (length + bestMatchCost > matchCost + *bestLength) {
+				*bestDistance = distance;
+				*bestLength = length;
+				*lazySteps = 2;
 				bestMatchCost = matchCost;
+
+				if (*bestLength >= compressorOptions.niceLength) {
+					while (!chain8.ended())
+						chain8.next(&pos);
+					return;
+				}
 			}
 		}
 	}
@@ -1534,6 +1584,8 @@ namespace skanda {
 					uint8_t* const controlByte = output++;
 					skanda_encode_literal_run(input, literalRunStart, controlByte, output);
 
+					lzdict4[read_hash4(input - 1)].push(input - 1 - inputStart);
+					lzdict8[read_hash8(input - 1)].push(input - 1 - inputStart);
 					lzdict4[read_hash4(input + 0)].push(input + 0 - inputStart);
 					lzdict8[read_hash8(input + 0)].push(input + 0 - inputStart);
 					lzdict4[read_hash4(input + 1)].push(input + 1 - inputStart);
@@ -1558,10 +1610,10 @@ namespace skanda {
 
 				if (matchLength) {
 
-					//Add the last 16 positions
+					//Add the last positions
 					const uint8_t* const matchEnd = input + matchLength;
 					const uint8_t* const updateStart = input + testedPositions - lazySteps;
-					const uint8_t* matchPos = std::max(updateStart, matchEnd - std::min(matchLength, (size_t)16));
+					const uint8_t* matchPos = std::max(updateStart, matchEnd - std::min(matchLength, (size_t)compressorOptions.niceLength / 2));
 					for (; matchPos != matchEnd; matchPos++) {
 						lzdict4[read_hash4(matchPos)].push(matchPos - inputStart);
 						lzdict8[read_hash8(matchPos)].push(matchPos - inputStart);
@@ -1579,7 +1631,7 @@ namespace skanda {
 
 					input = matchEnd;
 					literalRunStart = input;
-					skanda_encode_normal_match(output, controlByte, matchLength, distance, &repOffset);
+					skanda_encode_match(output, controlByte, matchLength, distance, &repOffset);
 				}
 			}
 
@@ -1746,7 +1798,7 @@ namespace skanda {
 
 			//Update only the last positions. This mainly helps when there are long matches
 			const uint8_t* const matchEnd = input + position + lastMatchLength;
-			const uint8_t* inputPosition = matchEnd - std::min((size_t)compressorOptions.niceLength / 4, lastMatchLength) + 1;
+			const uint8_t* inputPosition = matchEnd - std::min((size_t)compressorOptions.niceLength / 2, lastMatchLength) + 1;
 			for (; inputPosition < matchEnd; inputPosition++)
 				matchFinder->update_position(inputPosition, inputStart);
 		}
@@ -1999,11 +2051,7 @@ namespace skanda {
 
 			//Update only the last positions. This mainly helps when there are long matches
 			const uint8_t* const matchEnd = input + position + lastMatchLength;
-			const uint8_t* inputPosition;
-			if (compressorOptions.parserFunction == OPTIMAL_BRUTE)
-				inputPosition = input + position;
-			else
-				inputPosition = matchEnd - std::min((size_t)compressorOptions.niceLength / 4, lastMatchLength) + 1;
+			const uint8_t* inputPosition = matchEnd - std::min((size_t)compressorOptions.niceLength / 2, lastMatchLength) + 1;
 			for (; inputPosition < matchEnd; inputPosition++)
 				matchFinder->update_position(inputPosition, inputStart, limit, compressorOptions, window);
 		}
