@@ -13,14 +13,14 @@ Then simply add the header file anywhere you need.
 
 The API is very simple and straightforward. To compress you might do something like this:
 ```cpp
-uint8_t* outputBuf = new uint8_t[skanda::skanda_compress_bound(inputSize)];
-size_t compressedSize = skanda::skanda_compress(inputBuf, inputSize, outputBuf);
+uint8_t* outputBuf = new uint8_t[skanda::compress_bound(inputSize)];
+size_t compressedSize = skanda::compress(inputBuf, inputSize, outputBuf);
 if (compressedSize == -1)
   std::cout << "Error while compressing data";
 ```
 And to decompress:
 ```cpp
-int res = skanda::skanda_decompress(compressedBuf, compressedSize, decompressedBuf, uncompressedSize);
+int res = skanda::decompress(compressedBuf, compressedSize, decompressedBuf, uncompressedSize);
 if (res == -1)
   std::cout << "Error while decompressing data";
 ```
@@ -42,12 +42,12 @@ public:
 int main() {
   //...
   MyCallback myCallback(inputSize);
-  size_t compressedSize = skanda::skanda_compress(input, inputSize, output, level, window, &myCallback);
+  size_t compressedSize = skanda::compress(input, inputSize, output, level, window, &myCallback);
   //...
 }
 ```
 
-You can also get the amount of extra memory used by the compression using skanda_estimate_memory().
+You can also get the amount of extra memory used by the compression using estimate_memory().
 
 # Benchmarks
 
@@ -73,11 +73,11 @@ The algorithm was benchmarked using [lzbench](https://github.com/inikep/lzbench)
 | lizard 1.0 -43          |    41 MB/s |  1203 MB/s |    71818260 | 33.88 |
 | lizard 1.0 -46          |  7.85 MB/s |  1203 MB/s |    65573603 | 30.94 |
 | lizard 1.0 -49          |  1.64 MB/s |  1218 MB/s |    60861708 | 28.72 |
-| **skanda 1.3.7 -0**     |   528 MB/s |  2147 MB/s |    97972166 | 46.22 |
-| **skanda 1.3.7 -3**     |    92 MB/s |  1957 MB/s |    76364875 | 36.03 |
-| **skanda 1.3.7 -5**     |    18 MB/s |  1980 MB/s |    71130024 | 33.56 |
-| **skanda 1.3.7 -7**     |  5.75 MB/s |  2018 MB/s |    68479859 | 32.31 |
-| **skanda 1.3.7 -9**     |  3.44 MB/s |  2011 MB/s |    66708134 | 31.47 |
+| **skanda 1.4.0 -0**     |   551 MB/s |  2089 MB/s |    97997954 | 46.24 | 
+| **skanda 1.4.0 -3**     |    88 MB/s |  1922 MB/s |    76225105 | 35.96 |
+| **skanda 1.4.0 -5**     |    16 MB/s |  1975 MB/s |    70977964 | 33.49 | 
+| **skanda 1.4.0 -7**     |  5.16 MB/s |  1987 MB/s |    68332864 | 32.24 | 
+| **skanda 1.4.0 -9**     |  3.44 MB/s |  1981 MB/s |    66699101 | 31.47 | 
 | zstd 1.5.2 -1           |   319 MB/s |   787 MB/s |    73422932 | 34.64 |
 | zstd 1.5.2 -6           |    73 MB/s |   777 MB/s |    61481995 | 29.01 |
 | zstd 1.5.2 -12          |    20 MB/s |   823 MB/s |    58196278 | 27.46 |
