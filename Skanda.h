@@ -18,14 +18,11 @@
 namespace skanda {
 	//Base class that allows to track progress of compression and decompression of
 	// a Skanda stream. You will have to create a child class which implements the functions.
-	// - progress(bytes): the algorithm will pass the number of bytes that have been compressed/decompressed
-	// - abort(): if this returns true, the compression or decompression will stop with a return code of 0
+	// - progress(): the algorithm will pass the number of bytes that have been compressed/decompressed, 
+	//				 and its current compressed size. The function will return whether to stop encoding/decoding.
 	class ProgressCallback {
 	public:
-		virtual void progress(size_t bytes) {
-			return;
-		}
-		virtual int abort() {
+		virtual bool progress(size_t processedBytes, size_t compressedSize) {
 			return false;
 		}
 	};
@@ -1087,9 +1084,8 @@ namespace skanda {
 				}
 			}
 
-			if (progress->abort())
+			if (progress->progress(input - inputStart, output - outputStart))
 				return 0;
-			progress->progress(input - inputStart);
 		}
 
 		//Due to the acceleration we might have gone beyond the end
@@ -1100,7 +1096,7 @@ namespace skanda {
 		encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -1201,9 +1197,8 @@ namespace skanda {
 				}
 			}
 
-			if (progress->abort())
+			if (progress->progress(input - inputStart, output - outputStart))
 				return 0;
-			progress->progress(input - inputStart);
 		}
 
 		//Due to the acceleration we might have gone beyond the end
@@ -1214,7 +1209,7 @@ namespace skanda {
 		encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -1297,16 +1292,15 @@ namespace skanda {
 				}
 			}
 
-			if (progress->abort())
+			if (progress->progress(input - inputStart, output - outputStart))
 				return 0;
-			progress->progress(input - inputStart);
 		}
 
 		uint8_t* const controlByte = output++;
 		encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -1476,16 +1470,15 @@ namespace skanda {
 				}
 			}
 
-			if (progress->abort())
+			if (progress->progress(input - inputStart, output - outputStart))
 				return 0;
-			progress->progress(input - inputStart);
 		}
 
 		uint8_t* const controlByte = output++;
 		encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -1728,16 +1721,15 @@ namespace skanda {
 				}
 			}
 
-			if (progress->abort())
+			if (progress->progress(input - inputStart, output - outputStart))
 				return 0;
-			progress->progress(input - inputStart);
 		}
 
 		uint8_t* const controlByte = output++;
 		encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -2253,12 +2245,11 @@ namespace skanda {
 				}
 			}
 
-			if (progress->abort()) {
+			if (progress->progress(input - inputStart, output - outputStart)) {
 				delete[] parser;
 				delete[] stream;
 				return 0;
 			}
-			progress->progress(input - inputStart);
 		}
 
 		delete[] parser;
@@ -2269,7 +2260,7 @@ namespace skanda {
 		encode_literal_run(input, literalRunStart, controlByte, output);
 
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES);
+		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -2299,7 +2290,7 @@ namespace skanda {
 
 		if (size <= SKANDA_LAST_BYTES) {
 			memcpy(output, input, size);
-			progress->progress(size);
+			progress->progress(size, size);
 			return size;
 		}
 
@@ -2473,7 +2464,7 @@ namespace skanda {
 			if (compressedSize < decompressedSize)
 				return -1;
 			memcpy(decompressed, compressed, decompressedSize);
-			progress->progress(decompressedSize);
+			progress->progress(decompressedSize, decompressedSize);
 			return 0;
 		}
 
@@ -2532,9 +2523,8 @@ namespace skanda {
 			compressed += length;
 
 			if (unlikely(decompressed >= nextProgressReport)) {
-				if (progress->abort())
+				if (progress->progress(decompressed - decompressedStart, compressed - (compressedEnd - compressedSize)))
 					return 0;
-				progress->progress(decompressed - decompressedStart);
 
 				nextProgressReport = (decompressedEnd - decompressed < SKANDA_PROGRESS_REPORT_PERIOD) ?
 					decompressedEnd : decompressed + SKANDA_PROGRESS_REPORT_PERIOD;
@@ -2652,7 +2642,7 @@ namespace skanda {
 		}
 
 		memcpy(decompressed, compressed, SKANDA_LAST_BYTES);
-		progress->progress(SKANDA_LAST_BYTES);
+		progress->progress(decompressedSize, compressed - (compressedEnd - compressedSize));
 		return 0;
 	}
 }
