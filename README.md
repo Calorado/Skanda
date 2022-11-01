@@ -34,8 +34,9 @@ public:
   MyCallback(size_t _fileSize) {
     fileSize = _fileSize;
   }
-  void progress(size_t bytes) {
+  bool progress(size_t bytes) {
     std::cout << "Current progress: " << bytes << "/" << fileSize << "\n";
+    return false;
   }
 }
 
