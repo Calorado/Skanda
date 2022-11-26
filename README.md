@@ -1,6 +1,8 @@
 # Skanda
 
-Skanda is a compression algorithm based on LZ4 and Lizard, but designed for higher ratios, more similar to DEFLATE, while still keeping >1GB/s of decompression speed. This puts it somewhere between LZ4 and Zstd in the size/speed tradeoff, and makes it one of the strongest entropyless, byte-aligned LZs out there.
+Skanda is an experimental compression algorithm, trying to improve upon the Lizard algorithm. It usually gets higher ratios, very close to Deflate on larger windows, while keeping 75-80% of the decompression speed of LZ4. 
+
+Note that due to being experimental I cannot guarantee backwards/forwards compatibility, or good support for older or less common compiler/architectures.
 
 # How to use
 
@@ -48,39 +50,39 @@ int main() {
 }
 ```
 
-You can also get the amount of extra memory used by the compression using estimate_memory().
+Note: on GCC and Clang it should be compiled with -mbmi and -mbmi2 for maximum decompression speed.
 
 # Benchmarks
 
-The algorithm was benchmarked using [lzbench](https://github.com/inikep/lzbench) on Windows 10, on an i5-6300HQ and compiled with Visual Studio 2019. The file used was produced by tarring the [Silesia corpus](http://sun.aei.polsl.pl/~sdeor/index.php?page=silesia). The only additional parameter was -t16,16.
+The algorithm was benchmarked using [lzbench](https://github.com/inikep/lzbench) on Windows 11, on a Ryzen 6900HX@3.3GHz and compiled with Visual Studio 2022. The file used was produced by tarring the [Silesia corpus](http://sun.aei.polsl.pl/~sdeor/index.php?page=silesia). The only additional parameter was -t16,16.
 
 | Compressor name         | Compression| Decompress.| Compr. size | Ratio |
 | ---------------         | -----------| -----------| ----------- | ----- | 
-| memcpy                  | 11963 MB/s | 12223 MB/s |   211948544 |100.00 |  
-| lz4 1.9.4               |   488 MB/s |  3023 MB/s |   100880983 | 47.60 |
-| lz4hc 1.9.4 -1          |    91 MB/s |  2730 MB/s |    83804013 | 39.54 |
-| lz4hc 1.9.4 -4          |    59 MB/s |  2853 MB/s |    79808158 | 37.65 |
-| lz4hc 1.9.4 -9          |    24 MB/s |  2949 MB/s |    77884698 | 36.75 |
-| lz4hc 1.9.4 -12         |  8.51 MB/s |  3002 MB/s |    77262872 | 36.45 |
-| libdeflate 1.13 -1      |   178 MB/s |   545 MB/s |    73505591 | 34.68 |
-| libdeflate 1.13 -4      |    99 MB/s |   564 MB/s |    69471403 | 32.78 |
-| libdeflate 1.13 -8      |    32 MB/s |   581 MB/s |    66765105 | 31.50 |
-| libdeflate 1.13 -12     |  4.78 MB/s |   582 MB/s |    64686830 | 30.52 |
-| lizard 1.0 -20          |   307 MB/s |  1904 MB/s |    96927491 | 45.73 |
-| lizard 1.0 -23          |    43 MB/s |  1930 MB/s |    82079451 | 38.73 |
-| lizard 1.0 -26          |  5.13 MB/s |  1988 MB/s |    72564738 | 34.24 |
-| lizard 1.0 -29          |  1.72 MB/s |  1833 MB/s |    68942591 | 32.53 |
-| lizard 1.0 -40          |   234 MB/s |   987 MB/s |    80849296 | 38.15 |
-| lizard 1.0 -43          |    41 MB/s |  1203 MB/s |    71818260 | 33.88 |
-| lizard 1.0 -46          |  7.85 MB/s |  1203 MB/s |    65573603 | 30.94 |
-| lizard 1.0 -49          |  1.64 MB/s |  1218 MB/s |    60861708 | 28.72 |
-| **skanda 1.4.0 -0**     |   551 MB/s |  2089 MB/s |    97997954 | 46.24 | 
-| **skanda 1.4.0 -3**     |    88 MB/s |  1922 MB/s |    76225105 | 35.96 |
-| **skanda 1.4.0 -5**     |    16 MB/s |  1975 MB/s |    70977964 | 33.49 | 
-| **skanda 1.4.0 -7**     |  5.16 MB/s |  1987 MB/s |    68332864 | 32.24 | 
-| **skanda 1.4.0 -9**     |  3.44 MB/s |  1981 MB/s |    66699101 | 31.47 | 
-| zstd 1.5.2 -1           |   319 MB/s |   787 MB/s |    73422932 | 34.64 |
-| zstd 1.5.2 -6           |    73 MB/s |   777 MB/s |    61481995 | 29.01 |
-| zstd 1.5.2 -12          |    20 MB/s |   823 MB/s |    58196278 | 27.46 |
-| zstd 1.5.2 -17          |  3.76 MB/s |   771 MB/s |    54281107 | 25.61 |
-| zstd 1.5.2 -22          |  1.67 MB/s |   690 MB/s |    52476925 | 24.76 |
+| memcpy                  | 18569 MB/s | 18756 MB/s |   211948544 |100.00 |  
+| lz4 1.9.4               |   557 MB/s |  3169 MB/s |   100880983 | 47.60 |  
+| lz4hc 1.9.4 -1          |   104 MB/s |  2832 MB/s |    83804013 | 39.54 |  
+| lz4hc 1.9.4 -4          |    69 MB/s |  2965 MB/s |    79808158 | 37.65 |  
+| lz4hc 1.9.4 -9          |    27 MB/s |  3069 MB/s |    77884698 | 36.75 |  
+| lz4hc 1.9.4 -12         |  9.77 MB/s |  3146 MB/s |    77262872 | 36.45 |  
+| libdeflate 1.14 -1      |   194 MB/s |   764 MB/s |    73505591 | 34.68 |  
+| libdeflate 1.14 -4      |   112 MB/s |   801 MB/s |    69471403 | 32.78 |  
+| libdeflate 1.14 -8      |    32 MB/s |   799 MB/s |    66765105 | 31.50 |  
+| libdeflate 1.14 -12     |  5.59 MB/s |   808 MB/s |    64686830 | 30.52 |  
+| lizard 1.0 -20          |   354 MB/s |  2025 MB/s |    96927491 | 45.73 |  
+| lizard 1.0 -23          |    54 MB/s |  2075 MB/s |    82079451 | 38.73 |  
+| lizard 1.0 -26          |  5.46 MB/s |  2110 MB/s |    73469355 | 34.66 |  
+| lizard 1.0 -29          |  1.81 MB/s |  2063 MB/s |    69678229 | 32.88 |  
+| lizard 1.0 -40          |   255 MB/s |  1129 MB/s |    80849296 | 38.15 |  
+| lizard 1.0 -43          |    50 MB/s |  1352 MB/s |    71818260 | 33.88 |  
+| lizard 1.0 -46          |  8.27 MB/s |  1319 MB/s |    66462863 | 31.36 |  
+| lizard 1.0 -49          |  1.63 MB/s |  1401 MB/s |    61370631 | 28.96 |  
+| **skanda 0.5 -0**       |   561 MB/s |  2473 MB/s |    98832490 | 46.63 |  
+| **skanda 0.5 -3**       |   105 MB/s |  2206 MB/s |    78453193 | 37.02 |  
+| **skanda 0.5 -5**       |    23 MB/s |  2352 MB/s |    72169933 | 34.05 |  
+| **skanda 0.5 -7**       |  6.23 MB/s |  2521 MB/s |    68840176 | 32.48 |  
+| **skanda 0.5 -9**       |  3.20 MB/s |  2544 MB/s |    67675046 | 31.93 |  
+| zstd 1.5.2 -1           |   372 MB/s |   853 MB/s |    73422932 | 34.64 |  
+| zstd 1.5.2 -6           |    75 MB/s |   817 MB/s |    61481995 | 29.01 |  
+| zstd 1.5.2 -12          |    21 MB/s |   866 MB/s |    58196278 | 27.46 |  
+| zstd 1.5.2 -17          |  4.21 MB/s |   811 MB/s |    54281107 | 25.61 |  
+| zstd 1.5.2 -22          |  1.66 MB/s |   782 MB/s |    52476925 | 24.76 |  
