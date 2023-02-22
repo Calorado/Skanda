@@ -1,3 +1,6 @@
+// Public domain 
+// Carlos de Diego 2023
+
 #if defined(_MSC_VER)
 #define VC_EXTRALEAN
 #define WIN32_LEAN_AND_MEAN
@@ -20,6 +23,7 @@
 #include <thread>
 #include <mutex>
 #include <unordered_map>
+#include <iomanip>
 
 using namespace std;
 
@@ -262,10 +266,9 @@ void test_file(string path, string compressor, int level, int testTimeMode, size
         decompressed[i] = i;
     }
 
+    double nextWait = 0;
     double testTime = 0;
     if (testTimeMode != TEST_TIME_IMMEDIATE) {
-        //Make sure we get the processor for ourselves
-        std::this_thread::sleep_for(chrono::milliseconds(1));
         if (testTimeMode == TEST_TIME_SHORT) {
             const double MAX_TEST_TIME = 5e7; //0.05 seconds
             const double ESTIMATED_SPEED = 2.5e7;  //25MB/s
@@ -279,6 +282,12 @@ void test_file(string path, string compressor, int level, int testTimeMode, size
     double elapsedCTime = 0;
     *compressTime = 1e100;
     do {
+        //Give the processor to other processes every now and then, so
+        // that we can have it all for the benchmark
+        if (testTimeMode != TEST_TIME_IMMEDIATE && elapsedCTime > nextWait) {
+            std::this_thread::sleep_for(chrono::milliseconds(1));
+            nextWait += ceil(elapsedCTime * 10) / 10;  //Every 100 millis
+        }
         auto timeStart = chrono::high_resolution_clock::now();
         *compressedSize = availableCompressors[compressor].compress(data, fileSize, compressed, level);
         double time = (chrono::high_resolution_clock::now() - timeStart).count();
@@ -288,11 +297,14 @@ void test_file(string path, string compressor, int level, int testTimeMode, size
             *compressTime = time;
     } while (elapsedCTime < testTime);
 
-    if (testTimeMode != TEST_TIME_IMMEDIATE)
-        std::this_thread::sleep_for(chrono::milliseconds(1));
+    nextWait = 0;
     double elapsedDTime = 0;
     *decompressTime = 1e100;
     do {
+        if (testTimeMode != TEST_TIME_IMMEDIATE && elapsedCTime > nextWait) {
+            std::this_thread::sleep_for(chrono::milliseconds(1));
+            nextWait += ceil(elapsedDTime * 10) / 10;  //Every 100 millis
+        }
         auto timeStart = chrono::high_resolution_clock::now();
         *err = availableCompressors[compressor].decompress(compressed, *compressedSize, decompressed, fileSize);
         double time = (chrono::high_resolution_clock::now() - timeStart).count();
@@ -319,7 +331,7 @@ struct CompressorResults {
     double totalDTime = 0;
 };
 
-void test_file_thread(vector<string>* fileList, size_t* fileIt, vector<CompressorResults>* compressorsToRun, 
+void benchmark_thread(vector<string>* fileList, size_t* fileIt, vector<CompressorResults>* compressorsToRun, 
     vector<CompressorResults>::iterator compressor, int testTimeMode, std::mutex* mtx) 
 {
     while (true) {
@@ -353,10 +365,10 @@ void test_file_thread(vector<string>* fileList, size_t* fileIt, vector<Compresso
         compressor->totalDTime += decompressTime;
 
         for (auto i = compressorsToRun->begin(); i <= compressor; i++) {
-            cout << "\n" << i->compressor << " " << availableCompressors[i->compressor].version << " -" << i->level << "  Size: " << i->compressedSize << " / " << i->processedData
-                << " (" << (double)i->compressedSize / i->processedData * 100 << "%) "
-                << "Enc.T.: " << i->totalCTime / 1e9 << "s (" << i->processedData / (i->totalCTime / 1e9) / 1024 / 1024 << "MiB/s) "
-                << "Dec.T.: " << i->totalDTime / 1e9 << "s (" << i->processedData / (i->totalDTime / 1e9) / 1024 / 1024 << "MiB/s)";
+            cout << std::fixed << std::setprecision(2) << "\n| " << i->compressor << " " << availableCompressors[i->compressor].version << " -" << i->level << " | "
+                << i->processedData / (i->totalCTime / 1e9) / 1024 / 1024 << "MiB/s | "
+                << i->processedData / (i->totalDTime / 1e9) / 1024 / 1024 << "MiB/s | "
+                << i->compressedSize << " | " << (double)i->compressedSize / i->processedData * 100 << " |";
         }
         mtx->unlock();
     }
@@ -431,7 +443,7 @@ int main()
         size_t fileIt = 0;
         mutex mtx;
         for (int i = 0; i < concurrency; i++)
-            cpu[i] = thread(test_file_thread, &fileList, &fileIt, &compressorsToRun, compressorsIt, testTimeMode, &mtx);
+            cpu[i] = thread(benchmark_thread, &fileList, &fileIt, &compressorsToRun, compressorsIt, testTimeMode, &mtx);
         for (int i = 0; i < concurrency; i++)
             cpu->join();
         delete[] cpu;
