@@ -445,7 +445,7 @@ int main()
         for (int i = 0; i < concurrency; i++)
             cpu[i] = thread(benchmark_thread, &fileList, &fileIt, &compressorsToRun, compressorsIt, testTimeMode, &mtx);
         for (int i = 0; i < concurrency; i++)
-            cpu->join();
+            cpu[i].join();
         delete[] cpu;
     }
 
