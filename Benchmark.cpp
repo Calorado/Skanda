@@ -24,6 +24,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <iomanip>
+#include <vector>
 
 using namespace std;
 
@@ -64,7 +65,7 @@ int spectrum_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSi
 }
 #endif
 
-#ifndef NO_SPECTRUM_STRIDER
+#if !defined(NO_STRIDER) && !defined(NO_SPECTRUM)
 size_t spectrum_strider_backend(const uint8_t* data, const size_t size) {
     uint8_t* out;
     try {
@@ -78,12 +79,12 @@ size_t spectrum_strider_backend(const uint8_t* data, const size_t size) {
     return compressed;
 }
 size_t spectrum_strider_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
-    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, 16384, 768, 256, 96, true };
+    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, 0, 768, 256, 96, false };
     spectrum::EncoderOptions spectrumOptionsB = { &spectrum_strider_backend, 16384, 32768, 384, 128, 0, true };
     uint8_t* spectrumOut = new uint8_t[spectrum::bound(inSize)];
     size_t spectrumSize = spectrum::encode(in, inSize, spectrumOut, level >= 6 ? spectrumOptionsB : spectrumOptionsA);
     memcpy(out, &spectrumSize, sizeof(size_t));
-    size_t striderSize = strider::compress(spectrumOut, spectrumSize, out + 8, level);
+    size_t striderSize = strider::compress(spectrumOut, spectrumSize, out + 8, 0);
     delete[] spectrumOut;
     return striderSize + sizeof(size_t);
 }
@@ -222,7 +223,7 @@ unordered_map<string, Compressor> availableCompressors = {
 #ifndef NO_SPECTRUM
 	{ "spectrum", { "0.2_dev1", &spectrum_compress, &spectrum_decompress } },
 #endif
-#ifndef NO_SPECTRUM_STRIDER
+#if !defined(NO_STRIDER) && !defined(NO_SPECTRUM)
 	{ "spectrum_strider", { "0.3/0.2_dev1", &spectrum_strider_compress, &spectrum_strider_decompress } },
 #endif
 #ifndef NO_LZ4
@@ -301,7 +302,7 @@ void test_file(string path, string compressor, int level, int testTimeMode, size
     double elapsedDTime = 0;
     *decompressTime = 1e100;
     do {
-        if (testTimeMode != TEST_TIME_IMMEDIATE && elapsedCTime > nextWait) {
+        if (testTimeMode != TEST_TIME_IMMEDIATE && elapsedDTime > nextWait) {
             std::this_thread::sleep_for(chrono::milliseconds(1));
             nextWait += ceil(elapsedDTime * 10) / 10;  //Every 100 millis
         }
@@ -428,7 +429,7 @@ int main()
     else {
         testTimeMode = multithread ? TEST_TIME_IMMEDIATE : TEST_TIME_SHORT;
         for (auto entry : filesystem::recursive_directory_iterator(path)) {
-            if (!entry.is_directory())
+            if (!entry.is_directory() && entry.file_size() != 0)
                 fileList.push_back(entry.path().string());
         }
     }
