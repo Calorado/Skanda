@@ -1,5 +1,5 @@
 /*
- * Skanda Compression Algorithm v0.6
+ * Skanda Compression Algorithm v0.7
  * Copyright (c) 2022 Carlos de Diego
  *
  * This Source Code Form is subject to the terms of the Mozilla Public
@@ -28,11 +28,12 @@ namespace skanda {
 	};
 
 	//Compresses "size" bytes of data present in "input", and stores it in "output".
-	//"Level" specifies a tradeoff between compressed size and speed, and must be <= 9.
-	//Negative levels specify an acceleration value similar to that of LZ4, up to -63.
+	//"level" is a tradeoff between compressed size and compression speed, and must be <= 9.
+	//"decSpeedBias" is a tradeoff between compressed size and decompressed speed, 
+	// and must have a value between 0 and 1, with higher sacrificing ratio for speed.
 	//You may pass a pointer to an object with base class ProgressCallback, to track progress.
 	//Returns the size of the compressed stream or -1 on failure.
-	size_t compress(const uint8_t* input, size_t size, uint8_t* output, int level = 1, ProgressCallback* progress = nullptr);
+	size_t compress(const uint8_t* input, size_t size, uint8_t* output, int level = 1, float decSpeedBias = 0.35f, ProgressCallback* progress = nullptr);
 	//Decompresses contents in "compressed" to "decompressed".
 	//You may also pass a pointer to an object with base class ProgressCallback, to track progress.
 	//Returns 0 on success or -1 on failure or corrupted data.
@@ -43,7 +44,7 @@ namespace skanda {
 	// contain the compressed stream even if it expands.
 	size_t compress_bound(size_t size);
 	//Returns the amount of memory the algorithm will consume on compression.
-	size_t estimate_memory(size_t size, int level = 1);
+	size_t estimate_memory(size_t size, int level = 1, float decSpeedBias = 0.35f);
 }
 
 #ifdef SKANDA_IMPLEMENTATION
@@ -74,14 +75,10 @@ namespace skanda {
 #if defined(_MSC_VER)
   #if defined(_M_AMD64)
     #include <intrin.h>
-    #define COMPILE_WITH_BMI
   #endif
 #elif defined(__GNUC__) || defined(__clang__)
   #if defined(__amd64__)
-    #if defined(__BMI__) && defined(__BMI2__) 
-      #include <x86intrin.h>
-      #define COMPILE_WITH_BMI
-	#endif
+	#include <x86intrin.h>
   #endif
 #endif
 
@@ -91,22 +88,6 @@ namespace skanda {
 		const union { uint16_t u; uint8_t c[2]; } LITTLE_ENDIAN_CHECK = { 1 };
 		return LITTLE_ENDIAN_CHECK.c[0];
 	}
-
-	//Detect if cpu has both bmi1 and bmi2
-#if defined(COMPILE_WITH_BMI) && (defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__))
-	FORCE_INLINE bool has_bmi() {
-	#if  defined(_MSC_VER)
-		int reg[4];
-		__cpuid(reg, 0x00000007);
-		return ((reg[1] >> 8) & 1) && ((reg[1] >> 3) & 1);
-	#elif defined(__GNUC__) || defined(__clang__)
-		return __builtin_cpu_supports("bmi") && __builtin_cpu_supports("bmi2");
-	#endif 
-	}
-	const bool HAS_BMI = has_bmi();
-#else
-	const bool HAS_BMI = false;
-#endif
 
 	//Undefined behaviour if value == 0
 	FORCE_INLINE size_t unsafe_int_log2(size_t value) {
@@ -279,6 +260,25 @@ namespace skanda {
 		return read_hash4(ptr) >> 8;
 	}
 
+	FORCE_INLINE uint64_t read_uint64le(const uint8_t* const ptr) {
+		if (is_little_endian()) {
+			uint64_t value;
+			memcpy(&value, ptr, 8);
+			return value;
+		}
+		uint64_t value = 0;
+		for (int i = 0; i < 8; i++)
+			value |= (uint64_t)ptr[i] << i * 8;
+		return value;
+	}
+	FORCE_INLINE void write_uint64le(uint8_t* const ptr, const uint64_t value) {
+		if (is_little_endian())
+			memcpy(ptr, &value, 8);
+		else {
+			for (int i = 0; i < 8; i++)
+				ptr[i] = value >> i * 8;
+		}
+	}
 	FORCE_INLINE uint32_t read_uint32le(const uint8_t* const ptr) {
 		if (is_little_endian()) {
 			uint32_t value;
@@ -298,9 +298,41 @@ namespace skanda {
 				ptr[i] = value >> i * 8;
 		}
 	}
+	FORCE_INLINE uint32_t read_uint24le(const uint8_t* const ptr) {
+		uint32_t value = 0;
+		for (int i = 0; i < 3; i++)
+			value |= (uint32_t)ptr[i] << i * 8;
+		return value;
+	}
+	FORCE_INLINE void write_uint24le(uint8_t* const ptr, const uint32_t value) {
+		for (int i = 0; i < 3; i++)
+			ptr[i] = value >> i * 8;
+	}
+	FORCE_INLINE uint16_t read_uint16le(const uint8_t* const ptr) {
+		uint16_t value;
+		if (is_little_endian())
+			memcpy(&value, ptr, 2);
+		else
+			value = ptr[0] | (ptr[1] << 8);
+		return value;
+	}
+	FORCE_INLINE void write_uint16le(uint8_t* const ptr, const uint16_t value) {
+		if (is_little_endian())
+			memcpy(ptr, &value, 2);
+		else {
+			for (int i = 0; i < 2; i++)
+				ptr[i] = value >> i * 8;
+		}
+	}
 
-	//How many bytes to process before reporting progress or checking for abort flag
-	const int SKANDA_PROGRESS_REPORT_PERIOD = 512 * 1024;
+	//https://github.com/romeric/fastapprox/blob/master/fastapprox/src/fastlog.h
+	FORCE_INLINE float fast_log2(float x) {
+		union { float f; uint32_t i; } vx = { x };
+		float y = vx.i;
+		y *= 1.1920928955078125e-7f;
+		return y - 126.94269504f;
+	}
+
 	const int SKANDA_MIN_MATCH_LENGTH = 2;
 	const int SKANDA_MATCH_LENGTH_OVERFLOW = 8;
 	//These are written uncompressed
@@ -583,6 +615,7 @@ namespace skanda {
 					if (length >= compressorOptions.niceLength) {
 						chain3 = input - inputStart;
 						return matches;
+
 					}
 					nextExpectedLength = length + 1;
 				}
@@ -604,6 +637,7 @@ namespace skanda {
 
 					if (length >= nextExpectedLength) {
 						matches->distance = input - where;
+
 						matches->length = length;
 						matches++;
 
@@ -693,7 +727,8 @@ namespace skanda {
 		}
 
 		LZMatch* find_matches_and_update(const uint8_t* const input, const uint8_t* const inputStart,
-			const uint8_t* const limit, LZMatch* matches, size_t minLength, const CompressorOptions& compressorOptions)
+			const uint8_t* const compressionLimit, const uint8_t* const blockLimit, LZMatch* matches,
+			size_t minLength, const CompressorOptions& compressorOptions)
 		{
 			const size_t inputPosition = input - inputStart;
 			size_t nextExpectedLength = minLength;
@@ -703,7 +738,7 @@ namespace skanda {
 				uint32_t& chain3 = lzdict3[read_hash3(input)];
 				if (nextExpectedLength <= 3) {
 					const uint8_t* where = inputStart + chain3;
-					const size_t length = test_match(input, where, limit, 3);
+					const size_t length = test_match(input, where, blockLimit, 3);
 
 					if (length >= nextExpectedLength) {
 						matches->distance = input - where;
@@ -711,7 +746,7 @@ namespace skanda {
 						matches++;
 
 						if (length >= compressorOptions.niceLength) {
-							update_position(input, inputStart, limit, compressorOptions);
+							update_position(input, inputStart, blockLimit, compressorOptions);
 							return matches;
 						}
 						nextExpectedLength = length + 1;
@@ -723,12 +758,12 @@ namespace skanda {
 			//If we reach this position stop the search
 			const size_t btEnd = inputPosition < nodeListSize ? 0 : inputPosition - nodeListSize;
 
-			uint32_t& lookupEntry = nodeLookup[compressorOptions.parser >= OPTIMAL3 ? read_hash3(input) : read_hash4(input)];
+			uint32_t& lookupEntry = nodeLookup[compressorOptions.parser == OPTIMAL3 ? read_hash3(input) : read_hash4(input)];
 			size_t backPosition = lookupEntry;
 			lookupEntry = inputPosition;
 
 			uint32_t* lesserNode = &nodes[2 * (lookupEntry & nodeListMask)];
-			uint32_t* greaterNode = &nodes[2 * (lookupEntry & nodeListMask) + 1];
+			uint32_t* greaterNode = lesserNode + 1;
 			const uint8_t* lesserFront = input;
 			const uint8_t* greaterFront = input;
 
@@ -746,25 +781,27 @@ namespace skanda {
 				const uint8_t* front = std::min(lesserFront, greaterFront);
 				const uint8_t* back = front - (inputPosition - backPosition);
 
-				const size_t extraLength = test_match(front, back, limit, 0);
+				const size_t extraLength = test_match(front, back, compressionLimit, 0);
 				front += extraLength;
 				back += extraLength;
 
 				size_t length = front - input;
+				//Match cant go outside of block boundaries
+				const size_t effectiveLength = std::min(length, (size_t)(blockLimit - input));
 				uint32_t* const nextNode = &nodes[2 * (backPosition & nodeListMask)];
-				if (length >= nextExpectedLength) {
-					matches->distance = front - back;
-					matches->length = length;
-					matches++;
-
-					if (length >= compressorOptions.niceLength) {
-						*lesserNode = nextNode[0];
-						*greaterNode = nextNode[1];
-						return matches;
-					}
-					nextExpectedLength = length;
-					if (compressorOptions.parser < OPTIMAL3)
+				if (effectiveLength >= nextExpectedLength) {
+					nextExpectedLength = effectiveLength;
+					if (compressorOptions.parser != OPTIMAL3)
 						nextExpectedLength++;
+					matches->distance = front - back;
+					matches->length = effectiveLength;
+					matches++;
+				}
+
+				if (length >= compressorOptions.niceLength) {
+					*lesserNode = nextNode[0];
+					*greaterNode = nextNode[1];
+					return matches;
 				}
 
 				if (*back < *front) {
@@ -784,9 +821,9 @@ namespace skanda {
 			return matches;
 		}
 
-		void update_position(const uint8_t* const input, const uint8_t* const inputStart, 
-			const uint8_t* const limit, const CompressorOptions& compressorOptions) 
-		{
+		void update_position(const uint8_t* const input, const uint8_t* const inputStart, const uint8_t* const limit,
+			const CompressorOptions& compressorOptions) {
+
 			const size_t inputPosition = input - inputStart;
 			if (compressorOptions.parser < OPTIMAL3)
 				lzdict3[read_hash3(input)] = inputPosition;
@@ -795,7 +832,7 @@ namespace skanda {
 			const uint8_t* positionSkip = std::min(limit, input + compressorOptions.niceLength);
 			//If we reach this position on the back stop the update
 			const size_t btEnd = inputPosition < nodeListSize ? 0 : inputPosition - nodeListSize;
-			uint32_t& lookupEntry = nodeLookup[compressorOptions.parser >= OPTIMAL3 ? read_hash3(input) : read_hash4(input)];
+			uint32_t& lookupEntry = nodeLookup[compressorOptions.parser == OPTIMAL3 ? read_hash3(input) : read_hash4(input)];
 			size_t backPosition = lookupEntry;
 			lookupEntry = inputPosition;
 
@@ -844,209 +881,575 @@ namespace skanda {
 		}
 	};
 
-	FORCE_INLINE void copy_literal_run(const uint8_t* src, uint8_t* dst, const size_t length) {
+	enum {
+		ENTROPY_RAW = 0,
+		ENTROPY_HUFFMAN,
+	};
 
-		uint8_t* const end = dst + length;
-		do {
-			memcpy(dst, src, 16);
-			memcpy(dst + 16, src + 16, 16);
-			src += 32;
-			dst += 32;
-		} while (dst < end);
+	const int MAX_HUFFMAN_CODE_LENGTH = 11;
+	const int HUFFMAN_CODE_SPACE = 1 << MAX_HUFFMAN_CODE_LENGTH;
+	const size_t MAX_BLOCK_SIZE = 131072;
+
+	struct HuffmanSymbol {
+		uint32_t symbol;
+		uint32_t count;
+		uint32_t bits;
+		uint32_t code;
+	};
+
+	struct {
+		bool operator()(HuffmanSymbol a, HuffmanSymbol b) const { return a.count > b.count; }
+	} HuffmanSortByCount;
+
+	struct {
+		bool operator()(HuffmanSymbol a, HuffmanSymbol b) const {
+			if (a.bits != b.bits)
+				return a.bits < b.bits;
+			return a.symbol < b.symbol;
+		}
+	} HuffmanSortByBitsAndSymbol;
+
+	struct {
+		bool operator()(HuffmanSymbol a, HuffmanSymbol b) const { return a.symbol < b.symbol; }
+	} HuffmanSortBySymbol;
+
+	const uint32_t RANS_BIT_PRECISION = 16;
+	const uint32_t RANS_NORMALIZATION_INTERVAL = 1 << (RANS_BIT_PRECISION - 8);
+	const uint32_t RANS_MODEL_BIT_PRECISION = 8;
+
+	struct RansSymbol {
+		int symbol;
+		int freq;
+		int low;
+	};
+
+	struct PackageMergeNode {
+		std::vector<uint8_t> symbols;
+		size_t count;
+	};
+
+	struct {
+		bool operator()(PackageMergeNode a, PackageMergeNode b) const { return a.count < b.count; }
+	} SortPackageMergeNode;
+
+	//From https://experiencestack.co/length-limited-huffman-codes-21971f021d43
+	void package_merge(HuffmanSymbol symbolData[256]) {
+
+		std::vector<PackageMergeNode> originalList;
+		int uniqueSymbols = 0;
+		for (int i = 0; i < 256; i++) {
+			if (symbolData[i].count) {
+				PackageMergeNode newNode;
+				newNode.count = symbolData[i].count;
+				newNode.symbols.push_back(i);
+				originalList.push_back(newNode);
+				symbolData[i].bits = 0;
+			}
+			else
+				symbolData[i].bits = MAX_HUFFMAN_CODE_LENGTH + 1;
+		}
+		std::sort(originalList.begin(), originalList.end(), SortPackageMergeNode);
+		//We will only need this number of elements at the end
+		size_t maxListLength = originalList.size() * 2 - 2;
+
+		std::vector<PackageMergeNode> prevList = originalList;
+		for (int i = 1; i < MAX_HUFFMAN_CODE_LENGTH; i++) {
+
+			size_t listLength = prevList.size() & ~1; //If odd drop the last element
+			std::vector<PackageMergeNode> newList = originalList;
+			for (size_t j = 0; j < listLength; j += 2) {
+				PackageMergeNode newNode;
+				newNode.count = prevList[j].count + prevList[j + 1].count;
+				newNode.symbols = prevList[j].symbols;
+				newNode.symbols.insert(newNode.symbols.end(), prevList[j + 1].symbols.begin(), prevList[j + 1].symbols.end());
+				newList.push_back(newNode);
+			}
+
+			std::sort(newList.begin(), newList.end(), SortPackageMergeNode);
+			prevList = newList;
+		}
+
+		for (int i = 0; i < maxListLength; i++) {
+			for (int j = 0; j < prevList[i].symbols.size(); j++)
+				symbolData[prevList[i].symbols[j]].bits++;
+		}
 	}
 
-	FORCE_INLINE void encode_length(uint8_t*& output, size_t var, const size_t overflow) {
+	void fast_huffman_codegen(HuffmanSymbol symbolData[256]) {
+		//Dumb huffman code generation based on http://www.ezcodesample.com/prefixer/prefixer_article.html
+		//counts[0] has the highest count
+		std::sort(symbolData, symbolData + 256, HuffmanSortByCount);
+
+		//Round frequencies to the closest power of 2 in log scale (works better than round down)
+		int countSum = 0;
+		for (int i = 0; i < 256; i++) {
+			if (symbolData[i].count) {
+				symbolData[i].count = 1 << (int)round(fast_log2(symbolData[i].count));
+				countSum += symbolData[i].count;
+			}
+		}
+
+		//Scale frequencies to fit into code space
+		while (countSum > HUFFMAN_CODE_SPACE) {
+			for (int i = 0; i < 256; i++) {
+				if (symbolData[i].count > 1) {
+					symbolData[i].count >>= 1;
+					countSum -= symbolData[i].count;
+				}
+			}
+		}
+
+		int remainingCodeSpace = HUFFMAN_CODE_SPACE - countSum;
+		//Distribute remaining code space
+		while (remainingCodeSpace) {
+			for (int i = 0; i < 256; i++) {
+				if (symbolData[i].count <= remainingCodeSpace) {
+					remainingCodeSpace -= symbolData[i].count;
+					symbolData[i].count <<= 1;
+				}
+			}
+		}
+
+		//Give code lengths
+		for (int i = 0; i < 256; i++) {
+			if (symbolData[i].count)
+				symbolData[i].bits = MAX_HUFFMAN_CODE_LENGTH - unsafe_int_log2(symbolData[i].count);
+			else
+				symbolData[i].bits = MAX_HUFFMAN_CODE_LENGTH + 1;
+		}
+	}
+
+	class RansEncoder {
+
+		int values[256];
+		//rans stream has to be written backwards, store it first in a buffer
+		uint8_t streamBuffer[256];
+
+	public:
+		RansEncoder() {}
+		~RansEncoder() {}
+
+		void add_symbol(int bits, int index) {
+			values[index] = bits;
+		}
+
+		FORCE_INLINE void renormalize(const size_t interval, uint16_t& state, uint8_t*& streamBufferIt) {
+			bool renormalize = state >= interval;
+			streamBufferIt[-1] = state;
+			streamBufferIt -= renormalize;
+			state >>= renormalize << 3;
+		}
+		//Encodes all the symbols stored into a rans stream and returns the encoded size
+		size_t encode_tree(uint8_t* output) {
+
+			uint32_t counts[MAX_HUFFMAN_CODE_LENGTH + 2] = { 0 };
+			for (int i = 0; i < 256; i++)
+				counts[values[i]]++;
+
+			RansSymbol symbols[MAX_HUFFMAN_CODE_LENGTH + 2];
+			int accumulator = 0;
+			for (int i = 1; i <= MAX_HUFFMAN_CODE_LENGTH + 1; i++) {
+				symbols[i].freq = counts[i];
+				symbols[i].low = accumulator;
+				accumulator += counts[i];
+				//A byte can hold a maximum value of 255, while max freq is 256, but note 
+				// that can only happen if ALL symbols have 8 bits. In that case we would send it uncompressed.
+				*output++ = counts[i];
+			}
+
+			uint16_t stateA = RANS_NORMALIZATION_INTERVAL;
+			uint16_t stateB = RANS_NORMALIZATION_INTERVAL;
+			uint8_t* streamBufferIt = streamBuffer + 256;
+			for (int i = 256; i > 0; i -= 2) {
+				//std::swap(stateA, stateB);
+				size_t interval = (RANS_NORMALIZATION_INTERVAL << (8 - RANS_MODEL_BIT_PRECISION)) * symbols[values[i - 1]].freq;
+				renormalize(interval, stateB, streamBufferIt);
+				stateB = ((stateB / symbols[values[i - 1]].freq) << RANS_MODEL_BIT_PRECISION) + (stateB % symbols[values[i - 1]].freq) + symbols[values[i - 1]].low;
+
+				interval = (RANS_NORMALIZATION_INTERVAL << (8 - RANS_MODEL_BIT_PRECISION)) * symbols[values[i - 2]].freq;
+				renormalize(interval, stateA, streamBufferIt);
+				stateA = ((stateA / symbols[values[i - 2]].freq) << RANS_MODEL_BIT_PRECISION) + (stateA % symbols[values[i - 2]].freq) + symbols[values[i - 2]].low;
+			}
+			streamBufferIt -= 4;
+			write_uint16le(streamBufferIt + 0, stateA);
+			write_uint16le(streamBufferIt + 2, stateB);
+			size_t streamSize = streamBuffer + 256 - streamBufferIt;
+			memcpy(output, streamBufferIt, streamSize);
+			return streamSize + MAX_HUFFMAN_CODE_LENGTH + 1;
+		}
+	};
+
+	class HuffmanEncoder {
+
+		//huffman streams will be written backwards, store them first in a buffer
+		uint8_t* streamBuffer = nullptr;
+		uint8_t* streamBufferBegin;
+		//store huffman symbols
+		uint8_t* symbolBuffer = nullptr;
+		uint8_t* symbolBufferIt;
+
+	public:
+		HuffmanEncoder() {}
+		~HuffmanEncoder() {
+			delete[] streamBuffer;
+			delete[] symbolBuffer;
+		}
+
+		//Returns whether it fails to initialize
+		bool initialize_huffman_encoder(const size_t bufferSize, bool initializeStreamBuffer = true, bool initializeSymbolBuffer = true) {
+
+			try {
+				if (initializeStreamBuffer) {
+					streamBuffer = new uint8_t[bufferSize];
+					streamBufferBegin = streamBuffer + bufferSize;
+				}
+				if (initializeSymbolBuffer)
+					symbolBuffer = new uint8_t[bufferSize];
+			}
+			catch (const std::bad_alloc& e) {
+				delete[] streamBuffer;
+				delete[] symbolBuffer;
+				return true;
+			}
+			return false;
+		}
+
+		void start_huffman_block(uint8_t* outputBuffer = nullptr) {
+			if (outputBuffer)
+				symbolBufferIt = outputBuffer + 3;
+			else
+				symbolBufferIt = symbolBuffer;
+		}
+		FORCE_INLINE void add_distance(const uint32_t distance, size_t bytes) {
+			write_uint32le(symbolBufferIt, distance);
+			symbolBufferIt += bytes;
+		}
+		//Up to 8 elements
+		FORCE_INLINE void add_literals_short(const uint8_t* literals, size_t count) {
+			memcpy(symbolBufferIt, literals, 8);
+			symbolBufferIt += count;
+		}
+		//Any number of elements
+		FORCE_INLINE void add_literals_long(const uint8_t* literals, size_t count) {
+			uint8_t* end = symbolBufferIt + count;
+			do {
+				memcpy(symbolBufferIt + 0, literals + 0, 16);
+				memcpy(symbolBufferIt + 16, literals + 16, 16);
+				literals += 32;
+				symbolBufferIt += 32;
+			} while (symbolBufferIt < end);
+			symbolBufferIt = end;
+		}
+		FORCE_INLINE void add_byte(const uint8_t literal) {
+			*symbolBufferIt++ = literal;
+		}
+		FORCE_INLINE size_t bytes_in_buffer() {
+			return symbolBufferIt - symbolBuffer;
+		}
+
+		void symbol_histogram(const uint8_t* data, size_t count, uint32_t histogram[8][256]) {
+
+			memset(histogram, 0, 8 * 256 * sizeof(uint32_t));
+			const uint8_t* const fastLoopEnd = data + (count & ~0x7);
+			const uint8_t* const end = data + count;
+			for (; data < fastLoopEnd; data += 8) {
+				if (IS_64BIT) {
+					uint64_t w;
+					memcpy(&w, data, 8);
+					histogram[0][w >> 0 & 0xFF]++;
+					histogram[1][w >> 8 & 0xFF]++;
+					histogram[2][w >> 16 & 0xFF]++;
+					histogram[3][w >> 24 & 0xFF]++;
+					histogram[4][w >> 32 & 0xFF]++;
+					histogram[5][w >> 40 & 0xFF]++;
+					histogram[6][w >> 48 & 0xFF]++;
+					histogram[7][w >> 56 & 0xFF]++;
+				}
+				else {
+					uint32_t w;
+					memcpy(&w, data, 4);
+					histogram[0][w >> 0 & 0xFF]++;
+					histogram[1][w >> 8 & 0xFF]++;
+					histogram[2][w >> 16 & 0xFF]++;
+					histogram[3][w >> 24 & 0xFF]++;
+					memcpy(&w, data + 4, 4);
+					histogram[4][w >> 0 & 0xFF]++;
+					histogram[5][w >> 8 & 0xFF]++;
+					histogram[6][w >> 16 & 0xFF]++;
+					histogram[7][w >> 24 & 0xFF]++;
+				}
+			}
+			for (; data < end; data++)
+				histogram[0][*data]++;
+		}
+		float calculate_entropy(HuffmanSymbol counts[256], size_t symbolCount) {
+			float entropy = 0;
+			const float probDiv = 1 / float(symbolCount);
+			for (int i = 0; i < 256; i++) {
+				if (counts[i].count) {
+					const float prob = counts[i].count * probDiv;
+					entropy += -(prob * fast_log2(prob));
+				}
+			}
+			return entropy;
+		}
+		FORCE_INLINE int sum_counts(HuffmanSymbol counts[256]) {
+			int acc = 0;
+			for (int i = 0; i < 256; i++)
+				acc += counts[i].count;
+			return acc;
+		}
+		void write_entropy_header(uint8_t*& output, uint32_t symbolCount, int mode) {
+			uint32_t out;
+			out = symbolCount << 2;
+			out |= mode;
+			*output++ = out & 0xFF;
+			*output++ = out >> 8;
+			*output++ = out >> 16;
+		}
+		FORCE_INLINE void encode_op(HuffmanSymbol symbolData[256], const uint8_t symbol, size_t& state, size_t& bitCount) {
+			state = (state << symbolData[symbol].bits) | symbolData[symbol].code;
+			bitCount += symbolData[symbol].bits;
+		}
+		FORCE_INLINE void renormalize(size_t& state, size_t& bitCount, uint8_t*& streamBufferIt) {
+			//Branchless write
+			if (IS_64BIT)
+				write_uint64le(streamBufferIt - 8, state << (64 - bitCount));
+			else
+				write_uint32le(streamBufferIt - 4, state << (32 - bitCount));
+			streamBufferIt -= bitCount / 8;
+			bitCount &= 7;
+		}
+		void end_stream(uint64_t state, size_t bitCount, uint8_t*& streamBufferIt) {
+			while (bitCount >= 8) {
+				bitCount -= 8;
+				streamBufferIt--;
+				*streamBufferIt = state >> bitCount;
+			}
+			if (bitCount > 0) {
+				streamBufferIt--;
+				*streamBufferIt = state << (8 - bitCount);
+			}
+		}
+		size_t encode_stream(HuffmanSymbol symbolData[256], const uint8_t* symbolIt, const uint8_t* symbolEnd, uint8_t* output) {
+
+			const uint8_t* const fastLoopEnd = symbolIt + (symbolEnd - symbolIt) % (IS_64BIT ? 30 : 12);
+			uint8_t* streamBufferIt = streamBufferBegin;
+			size_t state = 0;
+			size_t bitCount = 0;
+
+			//Fast loop: write 5 symbols per iteration
+			for (; symbolIt < fastLoopEnd;) {
+				encode_op(symbolData, symbolIt[0], state, bitCount);
+				encode_op(symbolData, symbolIt[6], state, bitCount);
+				if (IS_64BIT) {
+					encode_op(symbolData, symbolIt[12], state, bitCount);
+					encode_op(symbolData, symbolIt[18], state, bitCount);
+					encode_op(symbolData, symbolIt[24], state, bitCount);
+				}
+				symbolIt += IS_64BIT ? 30 : 12;
+				renormalize(state, bitCount, streamBufferIt);
+			}
+			for (; symbolIt < symbolEnd; ) {
+				encode_op(symbolData, symbolIt[0], state, bitCount);
+				symbolIt += 6;  //Number of streams
+				renormalize(state, bitCount, streamBufferIt);
+			}
+			//Output remaining bits
+			end_stream(state, bitCount, streamBufferIt);
+
+			size_t streamSize = streamBufferBegin - streamBufferIt;
+			memcpy(output, streamBufferIt, streamSize);
+			return streamSize;
+		}
+		size_t store_block_raw(const uint8_t* symbols, uint8_t* output, const size_t symbolCount) {
+			write_entropy_header(output, symbolCount, ENTROPY_RAW);
+			memcpy(output, symbols, symbolCount);
+			return symbolCount + 3;
+		}
+		FORCE_INLINE size_t generate_codes_fast(uint8_t* output, const float decSpeedBias, bool useFastCodeGen) {
+
+			//This means we are directly writing to output, so just write the header
+			if (!symbolBuffer) {
+				size_t symbolCount = symbolBufferIt - output - 3;
+				write_entropy_header(output, symbolCount, ENTROPY_RAW);
+				return symbolCount + 3;
+			}
+
+			const size_t symbolCount = symbolBufferIt - symbolBuffer;
+			//Not enough symbols to justify compression or disabled huffman coding
+			if (symbolCount < 512 || !streamBuffer)
+				return store_block_raw(symbolBuffer, output, symbolCount);
+
+			uint8_t* const outputStart = output;
+			float maxBitsPerByte = 7.90 - (7 * decSpeedBias * decSpeedBias);
+
+			uint32_t histogram[8][256];
+			symbol_histogram(symbolBuffer, symbolCount, histogram);
+
+			HuffmanSymbol symbolData[256];
+			for (int i = 0; i < 256; i++) {
+				symbolData[i].symbol = i;
+				symbolData[i].count = histogram[0][i] + histogram[1][i] + histogram[2][i] + histogram[3][i] +
+					histogram[4][i] + histogram[5][i] + histogram[6][i] + histogram[7][i];
+			}
+
+			//Check if there is only one unique symbol. If that is the case, give some probability to 
+			// another symbol. Having a probability of 1 might break something
+			for (int i = 0; i < 256; i++) {
+				if (symbolData[i].count == symbolCount) {
+					symbolData[i].count--;
+					symbolData[(i + 1) % 256].count = 1;
+					break;
+				}
+			}
+
+			//Not compressible
+			float entropy = calculate_entropy(symbolData, symbolCount);
+			if (symbolCount * (entropy * 0.875 + 1.0) + 128 * 8 >= symbolCount * maxBitsPerByte)
+				return store_block_raw(symbolBuffer, output, symbolCount);
+
+			if (useFastCodeGen)
+				fast_huffman_codegen(symbolData);
+			else
+				package_merge(symbolData);
+
+			std::sort(symbolData, symbolData + 256, HuffmanSortByBitsAndSymbol);
+
+			//Convert counts to bit lengths and codes, and sort by symbol
+			HuffmanSymbol finalSymbols[256];
+			int accumulator = 0;
+			//Convert counts to codes
+			for (int i = 0; i < 256; i++) {
+				finalSymbols[symbolData[i].symbol].bits = symbolData[i].bits;
+				if (!symbolData[i].bits)
+					continue;
+				finalSymbols[symbolData[i].symbol].bits = symbolData[i].bits;
+				finalSymbols[symbolData[i].symbol].code = accumulator >> (MAX_HUFFMAN_CODE_LENGTH - symbolData[i].bits);
+				accumulator += HUFFMAN_CODE_SPACE >> symbolData[i].bits;
+			}
+
+			write_entropy_header(output, symbolCount, ENTROPY_HUFFMAN);
+			//Store the tree
+			RansEncoder normalTreeEncoder;
+			for (int i = 0; i < 256; i++)
+				normalTreeEncoder.add_symbol(finalSymbols[i].bits, i);
+			size_t treeSize = normalTreeEncoder.encode_tree(output);
+			output += treeSize;
+
+			uint8_t* jumpTable = output;
+			output += 12;
+
+			//Encode the 6 streams
+			size_t streamSize;
+			streamSize = encode_stream(finalSymbols, symbolBuffer + 0, symbolBuffer + symbolCount, output);
+			write_uint16le(jumpTable + 0, streamSize);
+			output += streamSize;
+			streamSize = encode_stream(finalSymbols, symbolBuffer + 1, symbolBuffer + symbolCount, output);
+			write_uint16le(jumpTable + 2, streamSize);
+			output += streamSize;
+			streamSize = encode_stream(finalSymbols, symbolBuffer + 2, symbolBuffer + symbolCount, output);
+			write_uint16le(jumpTable + 4, streamSize);
+			output += streamSize;
+			streamSize = encode_stream(finalSymbols, symbolBuffer + 3, symbolBuffer + symbolCount, output);
+			write_uint16le(jumpTable + 6, streamSize);
+			output += streamSize;
+			streamSize = encode_stream(finalSymbols, symbolBuffer + 4, symbolBuffer + symbolCount, output);
+			write_uint16le(jumpTable + 8, streamSize);
+			output += streamSize;
+			streamSize = encode_stream(finalSymbols, symbolBuffer + 5, symbolBuffer + symbolCount, output);
+			write_uint16le(jumpTable + 10, streamSize);
+			output += streamSize;
+
+			//If compressed size is very close to uncompressed size send it uncompressed
+			if ((output - outputStart + 128) * 8 >= symbolCount * maxBitsPerByte) {
+				output = outputStart;
+				return store_block_raw(symbolBuffer, output, symbolCount);
+			}
+
+			return output - outputStart;
+		}
+	};
+
+	FORCE_INLINE void encode_length(HuffmanEncoder* lengthEncoder, size_t var, const size_t overflow) {
 		var -= overflow;
 		if (likely(var <= 127))
-			*output++ = var;
+			lengthEncoder->add_byte(var);
 		else {
 			int iterations = unsafe_int_log2(var) / 7;
 			do {
-				*output++ = ((var >> iterations * 7) & 0x7F) | ((iterations != 0) << 7);
+				lengthEncoder->add_byte(((var >> iterations * 7) & 0x7F) | ((iterations != 0) << 7));
 				iterations--;
 			} while (iterations >= 0);
 		}
 	}
 
-	FORCE_INLINE void encode_literal_run(const uint8_t* const input,
-		const uint8_t* const literalRunStart, uint8_t* const controlByte, uint8_t*& output) {
+	FORCE_INLINE void encode_literal_run(HuffmanEncoder* literalEncoder, HuffmanEncoder* lengthEncoder, const uint8_t* const input,
+		const uint8_t* const literalRunStart, uint8_t* const controlByte) {
 
 		const size_t literalRunLength = input - literalRunStart;
 
 		if (literalRunLength >= 7) {
 			*controlByte = (7 << 5);
-			encode_length(output, literalRunLength, 7);
-			copy_literal_run(literalRunStart, output, literalRunLength);
+			encode_length(lengthEncoder, literalRunLength, 7);
+			literalEncoder->add_literals_long(literalRunStart, literalRunLength);
 		}
 		else {
 			*controlByte = (literalRunLength << 5);
 			//It is faster to unconditionally copy 8 bytes
-			memcpy(output, literalRunStart, 8);
+			literalEncoder->add_literals_short(literalRunStart, literalRunLength);
 		}
-		output += literalRunLength;
 	}
 
 	//Only encodes matches with rep offset
-	FORCE_INLINE void encode_rep_match(uint8_t*& output, uint8_t* const controlByte, size_t* matchLength) {
+	FORCE_INLINE void encode_rep_match(HuffmanEncoder* tokenEncoder, HuffmanEncoder* lengthEncoder, uint8_t* const controlByte, size_t* matchLength) {
 
 		*matchLength -= SKANDA_MIN_MATCH_LENGTH;
 		if (unlikely(*matchLength >= 7)) {
 			*controlByte |= 7;
-			encode_length(output, *matchLength, 7);
+			encode_length(lengthEncoder, *matchLength, 7);
 		}
 		else
 			*controlByte |= *matchLength;
+		tokenEncoder->add_byte(*controlByte);
 	}
 
 	//Only encodes matches with no rep offset
-	FORCE_INLINE void encode_normal_match(uint8_t*& output, uint8_t* const controlByte,
+	FORCE_INLINE void encode_normal_match(HuffmanEncoder* tokenEncoder, HuffmanEncoder* lengthEncoder, HuffmanEncoder* distanceEncoder, uint8_t* const controlByte,
 		size_t* matchLength, const size_t& distance, size_t* repOffset) {
 
 		*matchLength -= SKANDA_MIN_MATCH_LENGTH;
 		*repOffset = distance;
 
 		size_t bytes = unsafe_int_log2(distance) / 8 + 1;
-		write_uint32le(output, distance);
-		output += bytes;
+		distanceEncoder->add_distance(distance, bytes);
 		*controlByte |= bytes << 3;
 
 		if (unlikely(*matchLength >= 7)) {
 			*controlByte |= 7;
-			encode_length(output, *matchLength, 7);
+			encode_length(lengthEncoder, *matchLength, 7);
 		}
 		else
 			*controlByte |= *matchLength;
+
+		tokenEncoder->add_byte(*controlByte);
 	}
 
 	//Selects between encoding a normal or a rep match
-	FORCE_INLINE void encode_match(uint8_t*& output, uint8_t* const controlByte,
+	FORCE_INLINE void encode_match(HuffmanEncoder* tokenEncoder, HuffmanEncoder* lengthEncoder, HuffmanEncoder* distanceEncoder, uint8_t* const controlByte,
 		size_t* matchLength, const size_t& distance, size_t* repOffset) {
 
 		if (*repOffset == distance)
-			encode_rep_match(output, controlByte, matchLength);
+			encode_rep_match(tokenEncoder, lengthEncoder, controlByte, matchLength);
 		else
-			encode_normal_match(output, controlByte, matchLength, distance, repOffset);
+			encode_normal_match(tokenEncoder, lengthEncoder, distanceEncoder, controlByte, matchLength, distance, repOffset);
 	}
 
-	size_t compress_accelerated(const uint8_t* input, const size_t size, uint8_t* output,
-		const size_t accelerationBase, ProgressCallback* progress) {
+	size_t compress_ultra_fast(const uint8_t* input, const size_t size, uint8_t* output, const float decSpeedBias, ProgressCallback* progress) {
 
 		//Constants for this encoder
-		const size_t hashTableSize = 12;
-		const size_t accelerationThreshold = 3;
-		const size_t accelerationMax = 63;
-
-		const uint8_t* const inputStart = input;
-		const uint8_t* const outputStart = output;
-		//The last match or literal run must end before this limit
-		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
-
-		size_t repOffset = 1;
-		//Keeps track of how many match searches we have made without success. 
-		//When we dont find matches, we will skip more or less depending on this variable.
-		size_t acceleration = accelerationBase << accelerationThreshold;
-		const uint8_t* literalRunStart = input;
-		//Skip first byte
-		input++;
-
-		//The match finder is a simple hash table with constant size
-		HashTable<uint32_t, FastIntHash> lzdict;
-		try {
-			lzdict.init(hashTableSize);
-		}
-		catch (const std::bad_alloc& e) {
-			return -1;
-		}
-
-		//Main compression loop
-		while (input < compressionLimit) {
-
-			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
-				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
-
-			while (likely(input < nextProgressReport)) {
-
-				//Get possible match location and update the table
-				uint32_t* const dictEntry = &lzdict[read_hash8(input)];
-				const uint8_t* match = inputStart + *dictEntry;
-				*dictEntry = input - inputStart;
-				//Try to find a match
-				size_t matchLength = test_match(input, match, compressionLimit, 8);
-
-				//Have we found a match?
-				if (matchLength) {
-
-					//Add the next position to the table as well
-					lzdict[read_hash8(input + 1)] = input - inputStart + 1;
-
-					//Try to extend the match to the left
-					while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
-						matchLength++;
-						input--;
-						match--;
-					}
-					size_t distance = input - match;
-
-					//First output the literal run
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
-
-					input += matchLength;
-					literalRunStart = input;
-					//Output the match
-					encode_match(output, controlByte, &matchLength, distance, &repOffset);
-
-					//Try to find further rep matches
-					while (true) {
-
-						matchLength = test_match(input + 1, input + 1 - repOffset, compressionLimit, 3);
-						if (matchLength == 0)
-							break;
-
-						input++;
-						uint8_t* const controlByte = output++;
-						encode_literal_run(input, literalRunStart, controlByte, output);
-						//Add the position of the match to the hash table
-						lzdict[read_hash8(input)] = input - inputStart;
-
-						input += matchLength;
-						literalRunStart = input;
-						encode_rep_match(output, controlByte, &matchLength);
-					}
-
-					acceleration = accelerationBase << accelerationThreshold;
-				}
-				//If there isnt advance the position
-				else {
-					input += acceleration >> accelerationThreshold;
-					if (acceleration < (accelerationMax << accelerationThreshold))
-						acceleration++;
-				}
-			}
-
-			if (progress->progress(input - inputStart, output - outputStart))
-				return 0;
-		}
-
-		//Due to the acceleration we might have gone beyond the end
-		if (input > compressionLimit)
-			input = compressionLimit;
-		//Output the last literal run. This is necessary even when no more 
-		// literals remain, as the decoder expects to end with this
-		uint8_t* const controlByte = output++;
-		encode_literal_run(input, literalRunStart, controlByte, output);
-
-		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
-
-		return output - outputStart + SKANDA_LAST_BYTES;
-	}
-
-	size_t compress_ultra_fast(const uint8_t* input, const size_t size, uint8_t* output, ProgressCallback* progress) {
-
-		//Constants for this encoder
-		const size_t hashTableSize = 12;
-		const size_t accelerationThreshold = 3;
+		const size_t hashTableSize = 14;
+		const size_t accelerationThreshold = 4;
 		const size_t accelerationMax = 63;
 
 		const uint8_t* const inputStart = input;
@@ -1058,9 +1461,8 @@ namespace skanda {
 		//Keeps track of how many match searches we have made without success. 
 		//When we dont find matches, we will skip more or less depending on this variable.
 		size_t acceleration = 1 << accelerationThreshold;
-		const uint8_t* literalRunStart = input;
-		//Skip first byte
-		input++;
+		//First byte is send uncompressed
+		*output++ = *input++;
 
 		//The match finder is a simple hash table with constant size
 		HashTable<uint32_t, FastIntHash> lzdict;
@@ -1071,44 +1473,53 @@ namespace skanda {
 			return -1;
 		}
 
+		HuffmanEncoder literalEncoder;
+		HuffmanEncoder tokenEncoder;
+		HuffmanEncoder lengthEncoder;
+		HuffmanEncoder distanceEncoder;
+
+		bool disableHuffman = decSpeedBias >= 0.99;
+		size_t huffmanBufSize = std::min(MAX_BLOCK_SIZE, size);
+
+		if (literalEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman, !disableHuffman))
+			return -1;
+		if (tokenEncoder.initialize_huffman_encoder(huffmanBufSize / 2 + 128, !disableHuffman))
+			return -1;
+		if (lengthEncoder.initialize_huffman_encoder(huffmanBufSize / 8 + 128, !disableHuffman))
+			return -1;
+		if (distanceEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman))
+			return -1;
+
 		//Main compression loop
 		while (input < compressionLimit) {
 
-			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
-				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
+			const size_t thisBlockSize = compressionLimit - input < MAX_BLOCK_SIZE ? compressionLimit - input : MAX_BLOCK_SIZE;
+			const uint8_t* const thisBlockEnd = input + thisBlockSize;
+			const uint8_t* const thisBlockStart = input;
 
-			while (likely(input < nextProgressReport)) {
+			write_uint32le(output, thisBlockSize);
+			output += 4;
 
-				//First try to find a rep match. Doing it at position +1 gives better results.
-				//If one is found simply take it and skip normal match finding.
-				size_t matchLength = test_match(input + 1, input + 1 - repOffset, compressionLimit, 3);
-				if (matchLength) {
+			literalEncoder.start_huffman_block(disableHuffman ? output : nullptr);
+			tokenEncoder.start_huffman_block();
+			lengthEncoder.start_huffman_block();
+			distanceEncoder.start_huffman_block();
+			const uint8_t* literalRunStart = input;
 
-					input++;
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
-					//Add the position of the match to the hash table
-					lzdict[read_hash5(input)] = input - inputStart;
-
-					input += matchLength;
-					literalRunStart = input;
-					encode_rep_match(output, controlByte, &matchLength);
-					acceleration = 1 << accelerationThreshold;
-					continue;
-				}
+			while (likely(input < thisBlockEnd)) {
 
 				//Get possible match location and update the table
-				uint32_t* const dictEntry = &lzdict[read_hash5(input)];
+				uint32_t* const dictEntry = &lzdict[read_hash6(input)];
 				const uint8_t* match = inputStart + *dictEntry;
 				*dictEntry = input - inputStart;
 				//Try to find a match
-				matchLength = test_match(input, match, compressionLimit, 5);
+				size_t matchLength = test_match(input, match, thisBlockEnd, 6);
 
 				//Have we found a match?
 				if (matchLength) {
 
 					//Add the next position to the table as well
-					lzdict[read_hash5(input + 1)] = input - inputStart + 1;
+					lzdict[read_hash6(input + 1)] = input - inputStart + 1;
 
 					//Try to extend the match to the left
 					while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
@@ -1119,13 +1530,32 @@ namespace skanda {
 					const size_t distance = input - match;
 
 					//First output the literal run
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
+					uint8_t controlByte;
+					encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
 
 					input += matchLength;
 					literalRunStart = input;
 					//Output the match
-					encode_normal_match(output, controlByte, &matchLength, distance, &repOffset);
+					encode_normal_match(&tokenEncoder, &lengthEncoder, &distanceEncoder, &controlByte, &matchLength, distance, &repOffset);
+
+					//Try to find further rep matches
+					while (true) {
+
+						size_t off = input[1] == input[1 - repOffset] ? 1 : 2;
+						matchLength = test_match(input + off, input + off - repOffset, thisBlockEnd, 3);
+						if (matchLength == 0)
+							break;
+
+						input += off;
+						uint8_t controlByte;
+						encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
+						//Add the position of the match to the hash table
+						lzdict[read_hash6(input)] = input - inputStart;
+
+						input += matchLength;
+						literalRunStart = input;
+						encode_rep_match(&tokenEncoder, &lengthEncoder, &controlByte, &matchLength);
+					}
 
 					acceleration = 1 << accelerationThreshold;
 				}
@@ -1137,34 +1567,49 @@ namespace skanda {
 				}
 			}
 
-			if (progress->progress(input - inputStart, output - outputStart))
-				return 0;
+			//Maybe we went beyond block end because of acceleration
+			input = thisBlockEnd;
+			//Send last literal run
+			uint8_t controlByte;
+			encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
+			tokenEncoder.add_byte(controlByte);
+
+			size_t literalsSize = literalEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += literalsSize;
+			size_t tokensSize = tokenEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += tokensSize;
+			size_t lengthSize = lengthEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += lengthSize;
+			size_t distanceSize = distanceEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += distanceSize;
+
+			if (progress) {
+				if (progress->progress(input - inputStart, output - outputStart))
+					return 0;
+			}
 		}
 
-		//Due to the acceleration we might have gone beyond the end
-		if (input > compressionLimit)
-			input = compressionLimit;
-		//Output the last literal run. This is necessary even when no more 
-		// literals remain, as the decoder expects to end with this
-		uint8_t* const controlByte = output++;
-		encode_literal_run(input, literalRunStart, controlByte, output);
-
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
+		if (progress)
+			progress->progress(size, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
 
 	size_t compress_greedy(const uint8_t* input, const size_t size, uint8_t* output,
-		const int windowLog, const CompressorOptions& compressorOptions, ProgressCallback* progress) {
+		const int windowLog, const float decSpeedBias, const CompressorOptions& compressorOptions, ProgressCallback* progress)
+	{
+		const size_t accelerationThreshold = 5;
+		const size_t accelerationMax = 63;
 
 		const uint8_t* const inputStart = input;
 		const uint8_t* const outputStart = output;
 		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
 
 		size_t repOffset = 1;
-		const uint8_t* literalRunStart = input;
-		input++;
+		size_t acceleration = 1 << accelerationThreshold;
+		//First byte is send uncompressed
+		*output++ = *input++;
 
 		const size_t hashLog = std::min(compressorOptions.maxHashLog, windowLog - 3);
 		HashTable<uint32_t, FastIntHash> lzdict;
@@ -1175,27 +1620,56 @@ namespace skanda {
 			return -1;
 		}
 
+		HuffmanEncoder literalEncoder;
+		HuffmanEncoder tokenEncoder;
+		HuffmanEncoder lengthEncoder;
+		HuffmanEncoder distanceEncoder;
+
+		bool disableHuffman = decSpeedBias >= 0.99;
+		size_t huffmanBufSize = std::min(MAX_BLOCK_SIZE, size);
+
+		if (literalEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman, !disableHuffman))
+			return -1;
+		if (tokenEncoder.initialize_huffman_encoder(huffmanBufSize / 2 + 128, !disableHuffman))
+			return -1;
+		if (lengthEncoder.initialize_huffman_encoder(huffmanBufSize / 8 + 128, !disableHuffman))
+			return -1;
+		if (distanceEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman))
+			return -1;
+
+		//Main compression loop
 		while (input < compressionLimit) {
 
-			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
-				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
+			const size_t thisBlockSize = compressionLimit - input < MAX_BLOCK_SIZE ? compressionLimit - input : MAX_BLOCK_SIZE;
+			const uint8_t* const thisBlockEnd = input + thisBlockSize;
+			const uint8_t* const thisBlockStart = input;
 
-			while (input < nextProgressReport) {
+			write_uint32le(output, thisBlockSize);
+			output += 4;
 
-				//First try a rep match
-				size_t matchLength = test_match(input + 1, input + 1 - repOffset, compressionLimit, 3);
+			literalEncoder.start_huffman_block(disableHuffman ? output : nullptr);
+			tokenEncoder.start_huffman_block();
+			lengthEncoder.start_huffman_block();
+			distanceEncoder.start_huffman_block();
+			const uint8_t* literalRunStart = input;
 
+			while (input < thisBlockEnd) {
+
+				//First try to find a rep match. Doing it at position +1 gives better results.
+				//If one is found simply take it and skip normal match finding.
+				size_t matchLength = test_match(input + 1, input + 1 - repOffset, thisBlockEnd, 3);
 				if (matchLength) {
 
 					input++;
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
+					uint8_t controlByte;
+					encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
 
 					lzdict[read_hash5(input)] = input - inputStart;
 
 					input += matchLength;
 					literalRunStart = input;
-					encode_rep_match(output, controlByte, &matchLength);
+					encode_rep_match(&tokenEncoder, &lengthEncoder, &controlByte, &matchLength);
+					acceleration = 1 << accelerationThreshold;
 					continue;
 				}
 
@@ -1203,7 +1677,7 @@ namespace skanda {
 				uint32_t* dictEntry = &lzdict[read_hash5(input)];
 				const uint8_t* match = inputStart + *dictEntry;
 				*dictEntry = input - inputStart;
-				matchLength = test_match(input, match, compressionLimit, 5);
+				matchLength = test_match(input, match, thisBlockEnd, 5);
 
 				if (matchLength) {
 					//Add as many positions as minimum searched length
@@ -1218,29 +1692,45 @@ namespace skanda {
 						match--;
 					}
 
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
+					uint8_t controlByte;
+					encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
 
 					size_t distance = input - match;
 					input += matchLength;
 					literalRunStart = input;
-					encode_normal_match(output, controlByte, &matchLength, distance, &repOffset);
-					continue;
+					encode_normal_match(&tokenEncoder, &lengthEncoder, &distanceEncoder, &controlByte, &matchLength, distance, &repOffset);
+					acceleration = 1 << accelerationThreshold;
 				}
 				else {
-					input++;
+					input += acceleration >> accelerationThreshold;
+					if (acceleration < (accelerationMax << accelerationThreshold))
+						acceleration++;
 				}
 			}
 
-			if (progress->progress(input - inputStart, output - outputStart))
-				return 0;
+			input = thisBlockEnd;
+			uint8_t controlByte;
+			encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
+			tokenEncoder.add_byte(controlByte);
+
+			size_t literalsSize = literalEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += literalsSize;
+			size_t tokensSize = tokenEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += tokensSize;
+			size_t lengthSize = lengthEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += lengthSize;
+			size_t distanceSize = distanceEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += distanceSize;
+
+			if (progress) {
+				if (progress->progress(input - inputStart, output - outputStart))
+					return 0;
+			}
 		}
 
-		uint8_t* const controlByte = output++;
-		encode_literal_run(input, literalRunStart, controlByte, output);
-
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
+		if (progress)
+			progress->progress(size, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -1285,10 +1775,8 @@ namespace skanda {
 		}
 
 		//Nothing was found, code a literal and try again from the begining
-		if (*bestMatchLength < 5) {
-			*lazySteps = 1;
+		if (*bestMatchLength < 5)
 			return;
-		}
 
 		//Now try to find a longer match at next position
 		input++;
@@ -1328,15 +1816,19 @@ namespace skanda {
 	}
 
 	size_t compress_lazy_fast(const uint8_t* input, const size_t size, uint8_t* output,
-		const int windowLog, const CompressorOptions& compressorOptions, ProgressCallback* progress) {
+		const int windowLog, const float decSpeedBias, const CompressorOptions& compressorOptions, ProgressCallback* progress)
+	{
+		const size_t accelerationThreshold = 6;
+		const size_t accelerationMax = 63;
 
 		const uint8_t* const inputStart = input;
 		const uint8_t* const outputStart = output;
 		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
 
 		size_t repOffset = 1;
-		const uint8_t* literalRunStart = input;
-		input++;
+		size_t acceleration = 1 << accelerationThreshold;
+		//First byte is send uncompressed
+		*output++ = *input++;
 
 		const size_t hashLog = std::min(compressorOptions.maxHashLog, windowLog - 3);
 		LZ2WayCacheTable<uint32_t, FastIntHash> lzdict;
@@ -1347,20 +1839,48 @@ namespace skanda {
 			return -1;
 		}
 
+		HuffmanEncoder literalEncoder;
+		HuffmanEncoder tokenEncoder;
+		HuffmanEncoder lengthEncoder;
+		HuffmanEncoder distanceEncoder;
+
+		bool disableHuffman = decSpeedBias >= 0.99;
+		size_t huffmanBufSize = std::min(MAX_BLOCK_SIZE, size);
+
+		if (literalEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman, !disableHuffman))
+			return -1;
+		if (tokenEncoder.initialize_huffman_encoder(huffmanBufSize / 2 + 128, !disableHuffman))
+			return -1;
+		if (lengthEncoder.initialize_huffman_encoder(huffmanBufSize / 8 + 128, !disableHuffman))
+			return -1;
+		if (distanceEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman))
+			return -1;
+
+		//Main compression loop
 		while (input < compressionLimit) {
 
-			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
-				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
+			const size_t thisBlockSize = compressionLimit - input < MAX_BLOCK_SIZE ? compressionLimit - input : MAX_BLOCK_SIZE;
+			const uint8_t* const thisBlockEnd = input + thisBlockSize;
+			const uint8_t* const thisBlockStart = input;
 
-			while (input < nextProgressReport) {
+			write_uint32le(output, thisBlockSize);
+			output += 4;
+
+			literalEncoder.start_huffman_block(disableHuffman ? output : nullptr);
+			tokenEncoder.start_huffman_block();
+			lengthEncoder.start_huffman_block();
+			distanceEncoder.start_huffman_block();
+			const uint8_t* literalRunStart = input;
+
+			while (input < thisBlockEnd) {
 
 				//First try a rep match
-				size_t matchLength = test_match(input + 1, input + 1 - repOffset, compressionLimit, 3);
+				size_t matchLength = test_match(input + 1, input + 1 - repOffset, thisBlockEnd, 3);
 				if (matchLength) {
 
 					input++;
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
+					uint8_t controlByte;
+					encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
 
 					lzdict[read_hash5(input - 1)].push_in_first(input - 1 - inputStart);
 					lzdict[read_hash5(input + 0)].push_in_first(input + 0 - inputStart);
@@ -1369,7 +1889,8 @@ namespace skanda {
 
 					input += matchLength;
 					literalRunStart = input;
-					encode_rep_match(output, controlByte, &matchLength);
+					encode_rep_match(&tokenEncoder, &lengthEncoder, &controlByte, &matchLength);
+					acceleration = 1 << accelerationThreshold;
 					continue;
 				}
 
@@ -1377,15 +1898,14 @@ namespace skanda {
 				int lazySteps;   //bytes to skip because of lazy matching
 				int testedPositions;   //number of positions that have been added to hash table
 
-				fast_lazy_search(input, inputStart, compressionLimit, &lzdict,
+				fast_lazy_search(input, inputStart, thisBlockEnd, &lzdict,
 					&matchLength, &distance, &lazySteps, &testedPositions, compressorOptions.niceLength);
-
-				input += lazySteps;
 
 				if (matchLength) {
 
+					input += lazySteps;
 					//If distance < length, update the hash table only on the first "distance" bytes
-					const uint8_t* const updateEnd = input + std::min(distance, matchLength);
+					const uint8_t* const updateEnd = input + std::min(std::min(distance, matchLength), (size_t)compressorOptions.niceLength);
 					const uint8_t* matchPos = input + testedPositions - lazySteps;
 					for (; matchPos < updateEnd; matchPos++)
 						lzdict[read_hash5(matchPos)].push_in_first(matchPos - inputStart);
@@ -1397,24 +1917,44 @@ namespace skanda {
 						match--;
 					}
 
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
+					uint8_t controlByte;
+					encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
 
 					input += matchLength;
 					literalRunStart = input;
-					encode_normal_match(output, controlByte, &matchLength, distance, &repOffset);
+					encode_match(&tokenEncoder, &lengthEncoder, &distanceEncoder, &controlByte, &matchLength, distance, &repOffset);
+					acceleration = 1 << accelerationThreshold;
+				}
+				else {
+					input += acceleration >> accelerationThreshold;
+					if (acceleration < (accelerationMax << accelerationThreshold))
+						acceleration++;
 				}
 			}
 
-			if (progress->progress(input - inputStart, output - outputStart))
-				return 0;
+			input = thisBlockEnd;
+			uint8_t controlByte;
+			encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
+			tokenEncoder.add_byte(controlByte);
+
+			size_t literalsSize = literalEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += literalsSize;
+			size_t tokensSize = tokenEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += tokensSize;
+			size_t lengthSize = lengthEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += lengthSize;
+			size_t distanceSize = distanceEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += distanceSize;
+
+			if (progress) {
+				if (progress->progress(input - inputStart, output - outputStart))
+					return 0;
+			}
 		}
 
-		uint8_t* const controlByte = output++;
-		encode_literal_run(input, literalRunStart, controlByte, output);
-
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
+		if (progress)
+			progress->progress(size, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -1492,11 +2032,9 @@ namespace skanda {
 				}
 			}
 		}
-		else {
+		else
 			//No match found, code a literal and retry
-			*lazySteps = 1;
 			return;
-		}
 
 		//Now try to get a better match at pos + 1
 		input++;
@@ -1568,15 +2106,19 @@ namespace skanda {
 	}
 
 	size_t compress_lazy(const uint8_t* input, const size_t size, uint8_t* output,
-		const int windowLog, const CompressorOptions& compressorOptions, ProgressCallback* progress) {
+		const int windowLog, const float decSpeedBias, const CompressorOptions& compressorOptions, ProgressCallback* progress)
+	{
+		const size_t accelerationThreshold = 6;
+		const size_t accelerationMax = 63;
 
 		const uint8_t* const inputStart = input;
 		const uint8_t* const outputStart = output;
 		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
 
 		size_t repOffset = 1;
-		const uint8_t* literalRunStart = input;
-		input++;
+		size_t acceleration = 1 << accelerationThreshold;
+		//First byte is send uncompressed
+		*output++ = *input++;
 
 		const int hashLog = std::min(compressorOptions.maxHashLog, windowLog - 3);
 		LZCacheTable<uint32_t, FastIntHash> lzdict4;
@@ -1590,20 +2132,48 @@ namespace skanda {
 			return -1;
 		}
 
+		HuffmanEncoder literalEncoder;
+		HuffmanEncoder tokenEncoder;
+		HuffmanEncoder lengthEncoder;
+		HuffmanEncoder distanceEncoder;
+
+		bool disableHuffman = decSpeedBias >= 0.99;
+		size_t huffmanBufSize = std::min(MAX_BLOCK_SIZE, size);
+
+		if (literalEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman, !disableHuffman))
+			return -1;
+		if (tokenEncoder.initialize_huffman_encoder(huffmanBufSize / 2 + 128, !disableHuffman))
+			return -1;
+		if (lengthEncoder.initialize_huffman_encoder(huffmanBufSize / 8 + 128, !disableHuffman))
+			return -1;
+		if (distanceEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman))
+			return -1;
+
+		//Main compression loop
 		while (input < compressionLimit) {
 
-			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
-				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
+			const size_t thisBlockSize = compressionLimit - input < MAX_BLOCK_SIZE ? compressionLimit - input : MAX_BLOCK_SIZE;
+			const uint8_t* const thisBlockEnd = input + thisBlockSize;
+			const uint8_t* const thisBlockStart = input;
 
-			while (input < nextProgressReport) {
+			write_uint32le(output, thisBlockSize);
+			output += 4;
+
+			literalEncoder.start_huffman_block(disableHuffman ? output : nullptr);
+			tokenEncoder.start_huffman_block();
+			lengthEncoder.start_huffman_block();
+			distanceEncoder.start_huffman_block();
+			const uint8_t* literalRunStart = input;
+
+			while (input < thisBlockEnd) {
 
 				//First try a rep match
-				size_t matchLength = test_match(input + 1, input + 1 - repOffset, compressionLimit, 3);
+				size_t matchLength = test_match(input + 1, input + 1 - repOffset, thisBlockEnd, 3);
 				if (matchLength) {
 
 					input++;
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
+					uint8_t controlByte;
+					encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
 
 					lzdict4[read_hash4(input - 1)].push(input - 1 - inputStart);
 					lzdict6[read_hash6(input - 1)].push(input - 1 - inputStart);
@@ -1616,7 +2186,8 @@ namespace skanda {
 
 					input += matchLength;
 					literalRunStart = input;
-					encode_rep_match(output, controlByte, &matchLength);
+					encode_rep_match(&tokenEncoder, &lengthEncoder, &controlByte, &matchLength);
+					acceleration = 1 << accelerationThreshold;
 					continue;
 				}
 
@@ -1624,15 +2195,14 @@ namespace skanda {
 				int lazySteps;
 				int testedPositions;
 
-				lazy_search(input, inputStart, compressionLimit, &lzdict4, &lzdict6, &matchLength,
+				lazy_search(input, inputStart, thisBlockEnd, &lzdict4, &lzdict6, &matchLength,
 					&distance, &lazySteps, &testedPositions, compressorOptions.niceLength);
-
-				input += lazySteps;
 
 				if (matchLength) {
 
+					input += lazySteps;
 					//If distance < length, update the hash table only on the first "distance" bytes
-					const uint8_t* const updateEnd = input + std::min(distance, matchLength);
+					const uint8_t* const updateEnd = input + std::min(std::min(distance, matchLength), (size_t)compressorOptions.niceLength);
 					const uint8_t* matchPos = input + testedPositions - lazySteps;
 					for (; matchPos < updateEnd; matchPos++) {
 						lzdict4[read_hash4(matchPos)].push(matchPos - inputStart);
@@ -1646,24 +2216,44 @@ namespace skanda {
 						match--;
 					}
 
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
+					uint8_t controlByte;
+					encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
 
 					input += matchLength;
 					literalRunStart = input;
-					encode_match(output, controlByte, &matchLength, distance, &repOffset);
+					encode_match(&tokenEncoder, &lengthEncoder, &distanceEncoder, &controlByte, &matchLength, distance, &repOffset);
+					acceleration = 1 << accelerationThreshold;
+				}
+				else {
+					input += acceleration >> accelerationThreshold;
+					if (acceleration < (accelerationMax << accelerationThreshold))
+						acceleration++;
 				}
 			}
 
-			if (progress->progress(input - inputStart, output - outputStart))
-				return 0;
+			input = thisBlockEnd;
+			uint8_t controlByte;
+			encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
+			tokenEncoder.add_byte(controlByte);
+
+			size_t literalsSize = literalEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += literalsSize;
+			size_t tokensSize = tokenEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += tokensSize;
+			size_t lengthSize = lengthEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += lengthSize;
+			size_t distanceSize = distanceEncoder.generate_codes_fast(output, decSpeedBias, true);
+			output += distanceSize;
+
+			if (progress) {
+				if (progress->progress(input - inputStart, output - outputStart))
+					return 0;
+			}
 		}
 
-		uint8_t* const controlByte = output++;
-		encode_literal_run(input, literalRunStart, controlByte, output);
-
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
+		if (progress)
+			progress->progress(size, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -1680,10 +2270,11 @@ namespace skanda {
 	};
 
 	LZStructure* forward_optimal_parse(const uint8_t* const input, const uint8_t* const inputStart,
-		const uint8_t* const limit, HashTableMatchFinder* matchFinder, SkandaOptimalParserState* parser,
-		LZStructure* stream, const size_t startRepOffset, const CompressorOptions& compressorOptions)
+		const uint8_t* const blockLimit, HashTableMatchFinder* matchFinder, SkandaOptimalParserState* parser,
+		LZStructure* stream, const size_t startRepOffset, const CompressorOptions& compressorOptions,
+		size_t* acceleration, const size_t accelerationThreshold)
 	{
-		const size_t blockLength = std::min((size_t)(limit - input), (size_t)compressorOptions.optimalBlockSize);
+		const size_t blockLength = std::min((size_t)(blockLimit - input), (size_t)compressorOptions.optimalBlockSize);
 		//Initialize positions cost to maximum. We dont need to initialize ALL, only enough ahead
 		// to cover the maximum match length we can write, which is niceLength - 1, otherwise we would simply skip.
 		//This speeds up compression on data with a lot of long matches.
@@ -1697,6 +2288,7 @@ namespace skanda {
 		size_t lastMatchDistance;
 
 		size_t position = 0;
+		bool positionSkip = false;
 		for (; position < blockLength; position++) {
 
 			const uint8_t* inputPosition = input + position;
@@ -1705,8 +2297,9 @@ namespace skanda {
 			parserPosition[compressorOptions.niceLength].cost = UINT32_MAX;
 
 			//From Zstd: skip unpromising position
-			if (parserPosition[0].cost >= parserPosition[1].cost) {
+			if (parserPosition[0].cost >= parserPosition[1].cost || positionSkip) {
 				matchFinder->update_position(inputPosition, inputStart);
+				positionSkip = false;
 				continue;
 			}
 
@@ -1720,7 +2313,7 @@ namespace skanda {
 				nextPosition->literalRunLength = parserPosition->literalRunLength + 1;
 			}
 
-			size_t repMatchLength = test_match(inputPosition, inputPosition - parserPosition->distance, limit, 2);
+			size_t repMatchLength = test_match(inputPosition, inputPosition - parserPosition->distance, blockLimit, 2);
 			if (repMatchLength) {
 				//Rep matches can be unconditionally taken with lower lengths
 				if (repMatchLength >= compressorOptions.niceLength / 2) {
@@ -1741,66 +2334,55 @@ namespace skanda {
 					nextPosition->distance = parserPosition->distance;
 					nextPosition->literalRunLength = 0;
 				}
+
+				//When finding a rep match skip the next position
+				positionSkip = true;
+				if (repMatchLength >= 3)
+					*acceleration = 1 << accelerationThreshold;
 			}
 
 			LZMatch matches[17];
 			const LZMatch* matchesEnd = matchFinder->find_matches_and_update(inputPosition, inputStart,
-				limit, matches, repMatchLength + 1, compressorOptions);
+				blockLimit, matches, repMatchLength + 1, compressorOptions);
 
 			//At least one match was found
 			if (matchesEnd != matches) {
 				//The last match should be the longest
 				const LZMatch* const longestMatch = matchesEnd - 1;
 				if (longestMatch->length >= compressorOptions.niceLength) {
-
-					//Perform left match extension
-					size_t matchLength = longestMatch->length;
-					const uint8_t* leftExtension = inputPosition;
-					const uint8_t* literalRunStart = inputPosition - parserPosition->literalRunLength;
-					const uint8_t* match = inputPosition - longestMatch->distance;
-					while (leftExtension > literalRunStart && match > inputStart && leftExtension[-1] == match[-1]) {
-						matchLength++;
-						leftExtension--;
-						match--;
-						position--;
-					}
-
-					lastMatchLength = matchLength;
+					lastMatchLength = longestMatch->length;
 					lastMatchDistance = longestMatch->distance;
 					break;
 				}
 
-				//The parsing cycle always starts with a literal run length of 0 -> this wont go beyond the beginning of this cycle
-				const uint8_t* const literalRunStart = inputPosition - parserPosition->literalRunLength;
 				for (const LZMatch* matchIt = longestMatch; matchIt >= matches; matchIt--) {
 
-					//Perform left match extension
-					size_t matchLength = matchIt->length;
-					nextPosition = parserPosition + matchLength;
-
-					const uint8_t* leftExtension = inputPosition;
-					const uint8_t* match = inputPosition - matchIt->distance;
-					while (leftExtension > literalRunStart && match > inputStart && leftExtension[-1] == match[-1]) {
-						matchLength++;
-						leftExtension--;
-						match--;
-					}
-
-					SkandaOptimalParserState* prevState = nextPosition - matchLength;
-					size_t matchCost = prevState->cost;
+					size_t matchCost = parserPosition->cost;
 					//size cost
-					matchCost += (2 + unsafe_int_log2(matchIt->distance) / 8 + (matchLength > 8)) << 16;
-					matchCost += 1 + (matchLength > 8); //speed cost
+					matchCost += (2 + unsafe_int_log2(matchIt->distance) / 8 + (matchIt->length > 8)) << 16;
+					matchCost += 1 + (matchIt->length > 8); //speed cost
 
+					nextPosition = parserPosition + matchIt->length;
 					if (matchCost < nextPosition->cost) {
 						nextPosition->cost = matchCost;
-						nextPosition->matchLength = matchLength;
+						nextPosition->matchLength = matchIt->length;
 						nextPosition->distance = matchIt->distance;
 						nextPosition->literalRunLength = 0;
 					}
 					//If this match does not help, the shorter ones probably wont
 					else
 						break;
+				}
+
+				if (longestMatch->length >= 4)
+					*acceleration = 1 << accelerationThreshold;
+			}
+			else {
+				(*acceleration)++;
+				//If acceleration goes too high go to greedy parse
+				if (*acceleration >= (2 << accelerationThreshold)) {
+					position++;
+					break;
 				}
 			}
 		}
@@ -1820,18 +2402,18 @@ namespace skanda {
 			stream++;
 
 			//Update only first positions if distance < length
-			const uint8_t* const updateEnd = input + position + std::min(lastMatchDistance, lastMatchLength);
+			const uint8_t* const updateEnd = input + position + std::min(std::min(lastMatchDistance, lastMatchLength), (size_t)compressorOptions.niceLength);
 			const uint8_t* inputPosition = input + position + 1;
 			for (; inputPosition < updateEnd; inputPosition++)
 				matchFinder->update_position(inputPosition, inputStart);
 		}
 		else {
-			size_t bestPos = blockLength;
-			size_t bestSize = parser[blockLength].cost;
+			size_t bestPos = position;
+			size_t bestSize = parser[position].cost;
 			for (size_t i = 1; i < compressorOptions.niceLength; i++) {
-				if (parser[blockLength + i].cost <= bestSize) {
-					bestPos = blockLength + i;
-					bestSize = parser[blockLength + i].cost;
+				if (parser[position + i].cost <= bestSize) {
+					bestPos = position + i;
+					bestSize = parser[position + i].cost;
 				}
 			}
 			backwardParse = parser + bestPos;
@@ -1853,10 +2435,11 @@ namespace skanda {
 	}
 
 	LZStructure* multi_arrivals_parse(const uint8_t* input, const uint8_t* const inputStart,
-		const uint8_t* const limit, BinaryMatchFinder* matchFinder, SkandaOptimalParserState* parser,
-		LZStructure* stream, const size_t startRepOffset, const CompressorOptions& compressorOptions)
+		const uint8_t* const compressionLimit, const uint8_t* blockLimit, BinaryMatchFinder* matchFinder, SkandaOptimalParserState* parser,
+		LZStructure* stream, const size_t startRepOffset, const CompressorOptions& compressorOptions,
+		size_t* acceleration, const size_t accelerationThreshold)
 	{
-		const size_t blockLength = std::min((size_t)(limit - input), (size_t)compressorOptions.optimalBlockSize - 1);
+		const size_t blockLength = std::min((size_t)(blockLimit - input), (size_t)compressorOptions.optimalBlockSize - 1);
 		for (size_t i = 0; i < compressorOptions.niceLength * compressorOptions.maxArrivals; i++)
 			parser[i].cost = UINT32_MAX;
 		//Fill only the first arrival of the first position
@@ -1889,7 +2472,7 @@ namespace skanda {
 					break;
 
 				size_t literalCost = currentArrival->cost + (0x10000 << (currentArrival->literalRunLength == 6));  //size cost
-				literalCost += currentArrival->literalRunLength == 6;  //speed cost
+				literalCost += (currentArrival->literalRunLength == 6) * 2;  //speed cost
 				SkandaOptimalParserState* arrivalIt = parserPosition + compressorOptions.maxArrivals;
 				SkandaOptimalParserState* lastArrival = arrivalIt + compressorOptions.maxArrivals;
 
@@ -1909,13 +2492,13 @@ namespace skanda {
 					}
 				}
 
-				size_t repMatchLength = test_match(inputPosition, inputPosition - currentArrival->distance, limit, 2);
+				size_t repMatchLength = test_match(inputPosition, inputPosition - currentArrival->distance, blockLimit, 2);
 				//Since we go from lowest cost arrival to highest, it makes sense that the rep match
 				// should be at least as long as the best found so far
 				if (repMatchLength >= expectedNextLength) {
 					//Rep matches can be unconditionally taken with lower lengths
 					if (repMatchLength >= compressorOptions.niceLength / 2) {
-						matchFinder->update_position(inputPosition, inputStart, limit, compressorOptions);
+						matchFinder->update_position(inputPosition, inputStart, compressionLimit, compressorOptions);
 						lastMatchLength = repMatchLength;
 						lastMatchDistance = currentArrival->distance;
 						lastMatchPath = i;
@@ -1928,7 +2511,7 @@ namespace skanda {
 					//There is a notable speed increase for a negligible size penalty
 					size_t repMatchCost = currentArrival->cost;
 					repMatchCost += 0x10000 << (repMatchLength > SKANDA_MATCH_LENGTH_OVERFLOW);  //size cost
-					repMatchCost += 1 + (repMatchLength > SKANDA_MATCH_LENGTH_OVERFLOW);  //speed cost
+					repMatchCost += 1 + (repMatchLength > SKANDA_MATCH_LENGTH_OVERFLOW) * 2;  //speed cost
 
 					do {
 
@@ -1958,22 +2541,25 @@ namespace skanda {
 						if (repMatchLength <= SKANDA_MATCH_LENGTH_OVERFLOW || lengthOverflowTested)
 							break;
 
-						repMatchCost -= 0x10001;  //Remove the cost of the additional length byte
+						repMatchCost -= 0x10002;  //Remove the cost of the additional length byte
 						repMatchLength = SKANDA_MATCH_LENGTH_OVERFLOW;
 						lengthOverflowTested = true;
 
 					} while (true);
+
+					if (repMatchLength >= 3)
+						*acceleration = 1 << accelerationThreshold;
 				}
 			}
 
 			//Unpromising position
 			if (parserPosition[0].cost >= parserPosition[compressorOptions.maxArrivals].cost) {
-				matchFinder->update_position(inputPosition, inputStart, limit, compressorOptions);
+				matchFinder->update_position(inputPosition, inputStart, compressionLimit, compressorOptions);
 				continue;
 			}
 
 			LZMatch matches[66];
-			LZMatch* matchesEnd = matchFinder->find_matches_and_update(inputPosition, inputStart, limit, matches,
+			LZMatch* matchesEnd = matchFinder->find_matches_and_update(inputPosition, inputStart, compressionLimit, blockLimit, matches,
 				std::max(expectedNextLength, (size_t)3), compressorOptions);
 
 			if (matchesEnd != matches) {
@@ -1995,7 +2581,7 @@ namespace skanda {
 					size_t matchCost = parserPosition->cost;
 					//size cost
 					matchCost += (2 + unsafe_int_log2(matchIt->distance) / 8 + (matchIt->length > SKANDA_MATCH_LENGTH_OVERFLOW)) << 16;
-					matchCost += 1 + (matchIt->length > SKANDA_MATCH_LENGTH_OVERFLOW);  //speed cost
+					matchCost += 1 + (matchIt->length > SKANDA_MATCH_LENGTH_OVERFLOW) * 2;  //speed cost
 
 					size_t length = matchIt->length;
 					do {
@@ -2020,7 +2606,7 @@ namespace skanda {
 							if (arrivalIt->distance == matchIt->distance)
 								break;
 						}
-						
+
 						if (length <= SKANDA_MATCH_LENGTH_OVERFLOW || lengthOverflowTested)
 							break;
 
@@ -2028,9 +2614,21 @@ namespace skanda {
 						// length just below that overflow, try it
 						length = SKANDA_MATCH_LENGTH_OVERFLOW;
 						lengthOverflowTested = true;
-						matchCost -= 0x10001; //Remove length overflow cost
+						matchCost -= 0x10002; //Remove length overflow cost
 
 					} while (true);
+				}
+
+				if (longestMatch->length >= 4)
+					*acceleration = 1 << accelerationThreshold;
+			}
+			//Disable acceleration on level 9
+			else if (compressorOptions.parser < OPTIMAL3) {
+				(*acceleration)++;
+				//If acceleration goes too high go to greedy parse
+				if (*acceleration >= (2 << accelerationThreshold)) {
+					position++;
+					break;
 				}
 			}
 		}
@@ -2052,18 +2650,18 @@ namespace skanda {
 			backwardParse = parser + position * compressorOptions.maxArrivals;
 			path = lastMatchPath;
 
-			const uint8_t* const updateEnd = input + position + std::min(lastMatchDistance, lastMatchLength);
-			const uint8_t* inputPosition = input + position + 1;
-			for (; inputPosition < updateEnd; inputPosition++)
-				matchFinder->update_position(inputPosition, inputStart, limit, compressorOptions);
+			const uint8_t* const updateEnd = input + position + std::min(std::min(lastMatchDistance, lastMatchLength), (size_t)compressorOptions.niceLength);
+			const uint8_t* updatePos = input + position + 1;
+			for (; updatePos < updateEnd; updatePos++)
+				matchFinder->update_position(updatePos, inputStart, compressionLimit, compressorOptions);
 		}
 		else {
-			size_t bestPos = blockLength;
-			size_t bestSize = parser[blockLength * compressorOptions.maxArrivals].cost;
+			size_t bestPos = position;
+			size_t bestSize = parser[position * compressorOptions.maxArrivals].cost;
 			for (size_t i = 1; i < compressorOptions.niceLength; i++) {
-				if (parser[(blockLength + i) * compressorOptions.maxArrivals].cost <= bestSize) {
-					bestPos = blockLength + i;
-					bestSize = parser[(blockLength + i) * compressorOptions.maxArrivals].cost;
+				if (parser[(position + i) * compressorOptions.maxArrivals].cost <= bestSize) {
+					bestPos = position + i;
+					bestSize = parser[(position + i) * compressorOptions.maxArrivals].cost;
 				}
 			}
 			backwardParse = parser + bestPos * compressorOptions.maxArrivals;
@@ -2090,17 +2688,19 @@ namespace skanda {
 	}
 
 	size_t compress_optimal(const uint8_t* input, const size_t size, uint8_t* output,
-		const int windowLog, const CompressorOptions& compressorOptions, ProgressCallback* progress) {
+		const int windowLog, const float decSpeedBias, const CompressorOptions& compressorOptions, ProgressCallback* progress)
+	{
+		const size_t accelerationThreshold = 6;
+		const size_t accelerationMax = 63;
 
 		const uint8_t* const inputStart = input;
 		const uint8_t* const outputStart = output;
 		const uint8_t* const compressionLimit = input + size - SKANDA_LAST_BYTES;
 
-		//Data for the format
 		size_t repOffset = 1;
-		//Skip first byte
-		const uint8_t* literalRunStart = input;
-		input++;
+		size_t acceleration = 1 << accelerationThreshold;
+		//First byte is send uncompressed
+		*output++ = *input++;
 
 		HashTableMatchFinder hashMatchFinder;
 		BinaryMatchFinder binaryMatchFinder;
@@ -2124,59 +2724,146 @@ namespace skanda {
 			return -1;
 		}
 
+		HuffmanEncoder literalEncoder;
+		HuffmanEncoder tokenEncoder;
+		HuffmanEncoder lengthEncoder;
+		HuffmanEncoder distanceEncoder;
+
+		bool disableHuffman = decSpeedBias >= 0.99;
+		size_t huffmanBufSize = std::min(MAX_BLOCK_SIZE, size);
+
+		if (literalEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman, !disableHuffman))
+			return -1;
+		if (tokenEncoder.initialize_huffman_encoder(huffmanBufSize / 2 + 128, !disableHuffman))
+			return -1;
+		if (lengthEncoder.initialize_huffman_encoder(huffmanBufSize / 8 + 128, !disableHuffman))
+			return -1;
+		if (distanceEncoder.initialize_huffman_encoder(huffmanBufSize + 128, !disableHuffman))
+			return -1;
+
+		//Main compression loop
 		while (input < compressionLimit) {
 
-			const uint8_t* const nextProgressReport = (compressionLimit - input < SKANDA_PROGRESS_REPORT_PERIOD) ?
-				compressionLimit : input + SKANDA_PROGRESS_REPORT_PERIOD;
+			const size_t thisBlockSize = compressionLimit - input < MAX_BLOCK_SIZE ? compressionLimit - input : MAX_BLOCK_SIZE;
+			const uint8_t* const thisBlockEnd = input + thisBlockSize;
+			const uint8_t* const thisBlockStart = input;
 
-			while (input < nextProgressReport) {
+			write_uint32le(output, thisBlockSize);
+			output += 4;
 
-				LZStructure* streamIt;
-				if (compressorOptions.parser >= OPTIMAL2) {
-					streamIt = multi_arrivals_parse(input, inputStart, compressionLimit, &binaryMatchFinder,
-						parser, stream, repOffset, compressorOptions);
+			literalEncoder.start_huffman_block(disableHuffman ? output : nullptr);
+			tokenEncoder.start_huffman_block();
+			lengthEncoder.start_huffman_block();
+			distanceEncoder.start_huffman_block();
+			const uint8_t* literalRunStart = input;
+
+			while (input < thisBlockEnd) {
+
+				if (acceleration >= (2 << accelerationThreshold)) {
+
+					LZMatch matches[66];
+					LZMatch* matchesEnd;
+					if (compressorOptions.parser >= OPTIMAL2)
+						matchesEnd = binaryMatchFinder.find_matches_and_update(input, inputStart, compressionLimit, thisBlockEnd, matches, 4, compressorOptions);
+					else
+						matchesEnd = hashMatchFinder.find_matches_and_update(input, inputStart, thisBlockEnd, matches, 4, compressorOptions);
+
+					if (matchesEnd != matches) {
+						size_t distance = matchesEnd[-1].distance;
+						size_t length = matchesEnd[-1].length;
+						//Left match extension
+						const uint8_t* match = input - distance;
+						while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
+							length++;
+							input--;
+							match--;
+						}
+
+						uint8_t controlByte;
+						encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
+
+						input += length;
+						literalRunStart = input;
+						encode_match(&tokenEncoder, &lengthEncoder, &distanceEncoder, &controlByte, &length, distance, &repOffset);
+						acceleration = 1 << accelerationThreshold;
+					}
+					else {
+						input += acceleration >> accelerationThreshold;
+						if (acceleration < (accelerationMax << accelerationThreshold))
+							acceleration++;
+					}
 				}
 				else {
-					streamIt = forward_optimal_parse(input, inputStart, compressionLimit, &hashMatchFinder,
-						parser, stream, repOffset, compressorOptions);
-				}
+					LZStructure* streamIt;
+					if (compressorOptions.parser >= OPTIMAL2) {
+						streamIt = multi_arrivals_parse(input, inputStart, compressionLimit, thisBlockEnd, &binaryMatchFinder,
+							parser, stream, repOffset, compressorOptions, &acceleration, accelerationThreshold);
+					}
+					else {
+						streamIt = forward_optimal_parse(input, inputStart, thisBlockEnd, &hashMatchFinder,
+							parser, stream, repOffset, compressorOptions, &acceleration, accelerationThreshold);
+					}
 
-				//Main compression loop
-				while (true) {
-					input += streamIt->literalRunLength;
+					//Main compression loop
+					while (true) {
+						input += streamIt->literalRunLength;
 
-					if (streamIt == stream)
-						break;
+						if (streamIt == stream)
+							break;
 
-					size_t matchLength = streamIt->matchLength;
-					size_t distance = streamIt->matchDistance;
+						size_t matchLength = streamIt->matchLength;
+						size_t distance = streamIt->matchDistance;
 
-					uint8_t* const controlByte = output++;
-					encode_literal_run(input, literalRunStart, controlByte, output);
+						if (compressorOptions.parser == OPTIMAL1 && distance != repOffset) {
+							const uint8_t* match = input - distance;
+							while (input > literalRunStart && match > inputStart && input[-1] == match[-1]) {
+								matchLength++;
+								input--;
+								match--;
+							}
+						}
 
-					input += matchLength;
-					encode_match(output, controlByte, &matchLength, distance, &repOffset);
-					literalRunStart = input;
+						uint8_t controlByte;
+						encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
 
-					streamIt--;
+						input += matchLength;
+						literalRunStart = input;
+						encode_match(&tokenEncoder, &lengthEncoder, &distanceEncoder, &controlByte, &matchLength, distance, &repOffset);
+
+						streamIt--;
+					}
 				}
 			}
 
-			if (progress->progress(input - inputStart, output - outputStart)) {
-				delete[] parser;
-				delete[] stream;
-				return 0;
+			input = thisBlockEnd;
+			uint8_t controlByte;
+			encode_literal_run(&literalEncoder, &lengthEncoder, input, literalRunStart, &controlByte);
+			tokenEncoder.add_byte(controlByte);
+
+			size_t literalsSize = literalEncoder.generate_codes_fast(output, decSpeedBias, compressorOptions.parser == OPTIMAL1);
+			output += literalsSize;
+			size_t tokensSize = tokenEncoder.generate_codes_fast(output, decSpeedBias, compressorOptions.parser == OPTIMAL1);
+			output += tokensSize;
+			size_t lengthSize = lengthEncoder.generate_codes_fast(output, decSpeedBias, compressorOptions.parser == OPTIMAL1);
+			output += lengthSize;
+			size_t distanceSize = distanceEncoder.generate_codes_fast(output, decSpeedBias, compressorOptions.parser == OPTIMAL1);
+			output += distanceSize;
+
+			if (progress) {
+				if (progress->progress(input - inputStart, output - outputStart)) {
+					delete[] parser;
+					delete[] stream;
+					return 0;
+				}
 			}
 		}
 
 		delete[] parser;
 		delete[] stream;
 
-		uint8_t* const controlByte = output++;
-		encode_literal_run(input, literalRunStart, controlByte, output);
-
 		memcpy(output, input, SKANDA_LAST_BYTES);
-		progress->progress(input - inputStart + SKANDA_LAST_BYTES, output - outputStart + SKANDA_LAST_BYTES);
+		if (progress)
+			progress->progress(size, output - outputStart + SKANDA_LAST_BYTES);
 
 		return output - outputStart + SKANDA_LAST_BYTES;
 	}
@@ -2197,46 +2884,45 @@ namespace skanda {
 			{ OPTIMAL3     ,     24     ,          6          ,       1024    ,      4096       ,       16     },
 	};
 
-	size_t compress(const uint8_t* input, size_t size, uint8_t* output, int level, ProgressCallback* progress) {
-
-		ProgressCallback defaultProgress;
-		if (!progress)
-			progress = &defaultProgress;
+	size_t compress(const uint8_t* input, size_t size, uint8_t* output, int level, float decSpeedBias, ProgressCallback* progress) {
 
 		if (size <= SKANDA_LAST_BYTES) {
 			memcpy(output, input, size);
-			progress->progress(size, size);
+			if (progress)
+				progress->progress(size, size);
 			return size;
 		}
 
-		if (level < -63)
-			level = -63;
 		if (level > 10)
 			level = 10;
+		if (level < 0)
+			level = 0;
+		if (decSpeedBias < 0)
+			decSpeedBias = 0;
+		if (decSpeedBias > 1)
+			decSpeedBias = 1;
 		int windowLog = int_log2(size - 1) + 1;
 		if (windowLog > SKANDA_MAX_WINDOW_LOG)
 			windowLog = SKANDA_MAX_WINDOW_LOG;
 		if (windowLog < 6)
 			windowLog = 6;
 
-		if (level < 0)
-			return compress_accelerated(input, size, output, -level, progress);
 		if (skandaCompressorLevels[level].parser == GREEDY1)
-			return compress_ultra_fast(input, size, output, progress);
-		if (skandaCompressorLevels[level].parser == GREEDY2)
-			return compress_greedy(input, size, output, windowLog, skandaCompressorLevels[level], progress);
-		if (skandaCompressorLevels[level].parser == LAZY1)
-			return compress_lazy_fast(input, size, output, windowLog, skandaCompressorLevels[level], progress);
-		if (skandaCompressorLevels[level].parser == LAZY2)
-			return compress_lazy(input, size, output, windowLog, skandaCompressorLevels[level], progress);
-		return compress_optimal(input, size, output, windowLog, skandaCompressorLevels[level], progress);
+			return compress_ultra_fast(input, size, output, decSpeedBias, progress);
+		else if (skandaCompressorLevels[level].parser == GREEDY2)
+			return compress_greedy(input, size, output, windowLog, decSpeedBias, skandaCompressorLevels[level], progress);
+		else if (skandaCompressorLevels[level].parser == LAZY1)
+			return compress_lazy_fast(input, size, output, windowLog, decSpeedBias, skandaCompressorLevels[level], progress);
+		else if (skandaCompressorLevels[level].parser == LAZY2)
+			return compress_lazy(input, size, output, windowLog, decSpeedBias, skandaCompressorLevels[level], progress);
+		return compress_optimal(input, size, output, windowLog, decSpeedBias, skandaCompressorLevels[level], progress);
 	}
 
 	size_t compress_bound(size_t size) {
 		return size + size / 1024 + 8;
 	}
 
-	size_t memory_estimator(size_t size, int windowLog, int level) {
+	size_t lz_memory_usage(size_t size, int windowLog, int level) {
 		if (level < 0)
 			return sizeof(uint32_t) << 12;
 		if (skandaCompressorLevels[level].parser == GREEDY1)
@@ -2256,6 +2942,7 @@ namespace skanda {
 			memory += sizeof(uint32_t) << log2size << skandaCompressorLevels[level].maxElementsLog << 1;
 			memory += sizeof(SkandaOptimalParserState) *
 				(skandaCompressorLevels[level].optimalBlockSize + skandaCompressorLevels[level].niceLength);
+
 			memory += sizeof(LZStructure) * skandaCompressorLevels[level].optimalBlockSize;
 			return memory;
 		}
@@ -2272,9 +2959,10 @@ namespace skanda {
 			skandaCompressorLevels[level].maxArrivals;
 		memory += sizeof(LZStructure) * skandaCompressorLevels[level].optimalBlockSize;
 		return memory;
+		return 0;
 	}
 
-	size_t estimate_memory(size_t size, int level) {
+	size_t estimate_memory(size_t size, int level, float decSpeedBias) {
 
 		if (size <= SKANDA_LAST_BYTES + 1)
 			return 0;
@@ -2290,46 +2978,319 @@ namespace skanda {
 		if (windowLog < 6)
 			windowLog = 6;
 
-		return memory_estimator(size, windowLog, level);
+		bool disableHuffman = decSpeedBias >= 0.99;
+		size_t huffmanBufSize = std::min(MAX_BLOCK_SIZE, size);
+		size_t huffmanMemoryUsage = disableHuffman ? 0 : (huffmanBufSize + 128) * 2; //Literal stream
+		huffmanMemoryUsage += (huffmanBufSize / 2 + 128) * (disableHuffman ? 1 : 2); //Token stream
+		huffmanMemoryUsage += (huffmanBufSize / 8 + 128) * (disableHuffman ? 1 : 2); //Length stream
+		huffmanMemoryUsage += (huffmanBufSize + 128) * (disableHuffman ? 1 : 2); //Distance stream
+
+		return huffmanMemoryUsage + lz_memory_usage(size, windowLog, level);
 	}
+
+	class HuffmanDecoder {
+		size_t outBufferSize = 0;
+		uint8_t* outBuffer = nullptr;
+	public:
+		HuffmanDecoder(size_t maxOutBufferSize) {
+			outBufferSize = maxOutBufferSize;
+		}
+		~HuffmanDecoder() {
+			delete[] outBuffer;
+		}
+
+		FORCE_INLINE void read_entropy_header(const uint8_t*& compressed, uint32_t* symbolCount, int* mode) {
+			uint32_t in = read_uint24le(compressed);
+			compressed += 3;
+			*symbolCount = in >> 2;
+			*mode = in & 0x3;
+		}
+
+		struct HuffmanDecodeSymbol {
+			int symbol;
+			int bits;
+		};
+
+		int decode_huffman_tree(HuffmanDecodeSymbol symbols[256], const uint8_t*& compressed, const uint8_t* const compressedEnd) {
+
+			//From the frequencies we can infer how many symbols are in each code length, and directly write them sorted
+			int codeLengthIterators[MAX_HUFFMAN_CODE_LENGTH + 2];
+			RansSymbol decodeTable[256];
+
+			int accumulator = 0;
+			for (int i = 1; i <= MAX_HUFFMAN_CODE_LENGTH + 1; i++) {
+				int freq = *compressed++;
+				if (accumulator + freq > 256)
+					return -1;
+				for (int j = 0; j < freq; j++) {
+					decodeTable[accumulator + j].freq = freq;
+					decodeTable[accumulator + j].low = j;
+					decodeTable[accumulator + j].symbol = i;
+				}
+				codeLengthIterators[i] = accumulator;
+				accumulator += freq;
+			}
+
+			size_t stateA = read_uint16le(compressed + 0);
+			size_t stateB = read_uint16le(compressed + 2);
+			compressed += 4;
+
+			if (unlikely(compressed > compressedEnd))
+				return -1;
+
+			int accumulatedFreq = 0;
+			for (int i = 0; i < 256; i += 2) {
+				size_t stateLow = stateA & ((1 << RANS_MODEL_BIT_PRECISION) - 1);
+				stateA = decodeTable[stateLow].freq * (stateA >> RANS_MODEL_BIT_PRECISION) + decodeTable[stateLow].low;
+				size_t bits = decodeTable[stateLow].symbol;
+				accumulatedFreq += HUFFMAN_CODE_SPACE >> bits;
+
+				if (unlikely(codeLengthIterators[bits] == 256))
+					return -1;
+				symbols[codeLengthIterators[bits]].bits = bits;
+				symbols[codeLengthIterators[bits]].symbol = i;
+				codeLengthIterators[bits]++;
+
+				//Normalize
+				bool renormalize = stateA < RANS_NORMALIZATION_INTERVAL;
+				size_t newState = (stateA << 8) | *compressed;
+				stateA = (0 - renormalize & (newState ^ stateA)) ^ stateA;  //Hope the compiler replaces this with a cmov or equivalent
+				compressed += renormalize;
+
+				stateLow = stateB & ((1 << RANS_MODEL_BIT_PRECISION) - 1);
+				stateB = decodeTable[stateLow].freq * (stateB >> RANS_MODEL_BIT_PRECISION) + decodeTable[stateLow].low;
+				bits = decodeTable[stateLow].symbol;
+				accumulatedFreq += HUFFMAN_CODE_SPACE >> bits;
+
+				if (unlikely(codeLengthIterators[bits] == 256))
+					return -1;
+				symbols[codeLengthIterators[bits]].bits = bits;
+				symbols[codeLengthIterators[bits]].symbol = i + 1;
+				codeLengthIterators[bits]++;
+
+				//Normalize
+				renormalize = stateB < RANS_NORMALIZATION_INTERVAL;
+				newState = (stateB << 8) | *compressed;
+				stateB = (0 - renormalize & (newState ^ stateB)) ^ stateB;
+				compressed += renormalize;
+			}
+
+			return accumulatedFreq != HUFFMAN_CODE_SPACE ? -1 : 0;
+		}
+
+		struct HuffmanDecodeTableEntry {
+			uint8_t symbol;
+			uint8_t bits;
+		};
+
+		FORCE_INLINE void renormalize(size_t& state, const uint8_t*& stream) {
+			size_t consumedBits = unsafe_bit_scan_forward(state);
+			stream -= consumedBits >> 3;
+			state = (IS_64BIT ? read_uint64le(stream) : read_uint32le(stream)) | 1;
+			state <<= consumedBits & 7;
+		}
+
+		FORCE_INLINE void decode_op(size_t& state, uint8_t* const out, const HuffmanDecodeTableEntry* const table) {
+			const size_t value = state >> ((IS_64BIT ? 64 : 32) - MAX_HUFFMAN_CODE_LENGTH);
+			state <<= table[value].bits;
+			*out = table[value].symbol;
+		}
+
+		void generate_decode_table(const HuffmanDecodeSymbol symbols[256], HuffmanDecodeTableEntry* table)
+		{
+			HuffmanDecodeTableEntry* it = table;
+			for (int s1 = 0; s1 < 256; s1++) {
+				if (symbols[s1].bits > MAX_HUFFMAN_CODE_LENGTH)
+					break;
+				HuffmanDecodeTableEntry* upperRange = it + (HUFFMAN_CODE_SPACE >> symbols[s1].bits);
+				HuffmanDecodeTableEntry entry;
+				entry.symbol = symbols[s1].symbol;
+				entry.bits = symbols[s1].bits;
+
+				const uint64_t filling = 0x0001000100010001 * *(uint16_t*)(&entry);
+				do {
+					memcpy(it + 0, &filling, sizeof(uint64_t));
+					memcpy(it + 4, &filling, sizeof(uint64_t));
+					memcpy(it + 8, &filling, sizeof(uint64_t));
+					memcpy(it + 12, &filling, sizeof(uint64_t));
+					it += 16;
+				} while (it < upperRange);
+				it = upperRange;
+			}
+		}
+
+		int decode_symbols(const HuffmanDecodeSymbol symbols[256], const size_t symbolCount, const uint8_t* const compressed, uint8_t* out)
+		{
+			HuffmanDecodeTableEntry table[HUFFMAN_CODE_SPACE + 16]; //The +16 allows optimizations in table building
+			generate_decode_table(symbols, table);
+
+			const uint8_t* streamA = compressed + 12 + read_uint16le(compressed + 0);
+			const uint8_t* streamB = streamA + read_uint16le(compressed + 2);
+			const uint8_t* streamC = streamB + read_uint16le(compressed + 4);
+			const uint8_t* streamD = streamC + read_uint16le(compressed + 6);
+			const uint8_t* streamE = streamD + read_uint16le(compressed + 8);
+			const uint8_t* streamF = streamE + read_uint16le(compressed + 10);
+			const uint8_t* const streamBase = compressed; //Do not read beyond this point
+
+#if IS_64BIT
+			streamA -= 8;
+			size_t stateA = read_uint64le(streamA) | 1;
+			streamB -= 8;
+			size_t stateB = read_uint64le(streamB) | 1;
+			streamC -= 8;
+			size_t stateC = read_uint64le(streamC) | 1;
+			streamD -= 8;
+			size_t stateD = read_uint64le(streamD) | 1;
+			streamE -= 8;
+			size_t stateE = read_uint64le(streamE) | 1;
+			streamF -= 8;
+			size_t stateF = read_uint64le(streamF) | 1;
+			uint8_t* const fastLoopEnd = out + (symbolCount - symbolCount % 30);
+#else
+			streamA -= 4;
+			size_t stateA = read_uint32le(streamA) | 1;
+			streamB -= 4;
+			size_t stateB = read_uint32le(streamB) | 1;
+			streamC -= 4;
+			size_t stateC = read_uint32le(streamC) | 1;
+			streamD -= 4;
+			size_t stateD = read_uint32le(streamD) | 1;
+			streamE -= 4;
+			size_t stateE = read_uint32le(streamE) | 1;
+			streamF -= 4;
+			size_t stateF = read_uint32le(streamF) | 1;
+			uint8_t* const fastLoopEnd = out + (symbolCount - symbolCount % 12);
+#endif
+			uint8_t* const outEnd = out + symbolCount;
+
+			while (out < fastLoopEnd && streamA > streamBase && streamB > streamBase && streamC > streamBase &&
+				streamD > streamBase && streamE > streamBase && streamF > streamBase)
+			{
+				//First decode
+				decode_op(stateA, out + 0, table);
+				decode_op(stateB, out + 1, table);
+				decode_op(stateC, out + 2, table);
+				decode_op(stateD, out + 3, table);
+				decode_op(stateE, out + 4, table);
+				decode_op(stateF, out + 5, table);
+				//Second decode
+				decode_op(stateA, out + 6, table);
+				decode_op(stateB, out + 7, table);
+				decode_op(stateC, out + 8, table);
+				decode_op(stateD, out + 9, table);
+				decode_op(stateE, out + 10, table);
+				decode_op(stateF, out + 11, table);
+
+				if (IS_64BIT) {
+					//Third decode
+					decode_op(stateA, out + 12, table);
+					decode_op(stateB, out + 13, table);
+					decode_op(stateC, out + 14, table);
+					decode_op(stateD, out + 15, table);
+					decode_op(stateE, out + 16, table);
+					decode_op(stateF, out + 17, table);
+					//Fourth decode
+					decode_op(stateA, out + 18, table);
+					decode_op(stateB, out + 19, table);
+					decode_op(stateC, out + 20, table);
+					decode_op(stateD, out + 21, table);
+					decode_op(stateE, out + 22, table);
+					decode_op(stateF, out + 23, table);
+					//Fifth decode
+					decode_op(stateA, out + 24, table);
+					decode_op(stateB, out + 25, table);
+					decode_op(stateC, out + 26, table);
+					decode_op(stateD, out + 27, table);
+					decode_op(stateE, out + 28, table);
+					decode_op(stateF, out + 29, table);
+				}
+
+				renormalize(stateA, streamA);
+				renormalize(stateB, streamB);
+				renormalize(stateC, streamC);
+				renormalize(stateD, streamD);
+				renormalize(stateE, streamE);
+				renormalize(stateF, streamF);
+				out += IS_64BIT ? 30 : 12;
+			}
+
+			if (streamA <= streamBase || streamB <= streamBase || streamC <= streamBase ||
+				streamD <= streamBase || streamE <= streamBase || streamF <= streamBase)
+				return -1;
+
+			//States are already normalized, thus we have enough bits to decode remaining symbols
+			while (out < outEnd)
+			{
+				decode_op(stateA, out + 0, table);
+				decode_op(stateB, out + 1, table);
+				decode_op(stateC, out + 2, table);
+				decode_op(stateD, out + 3, table);
+				decode_op(stateE, out + 4, table);
+				decode_op(stateF, out + 5, table);
+				out += 6;
+			}
+
+			return 0;
+		}
+
+		//Returns a pointer to decompressed data, or nullptr if error. compressed will point 
+		// to end of this compressed stream and streamEnd to the end of decompressed data
+		const uint8_t* decode(const uint8_t*& compressed, const uint8_t* compressedEnd, const uint8_t*& streamEnd) {
+
+			uint32_t symbolCount;
+			int mode;
+			read_entropy_header(compressed, &symbolCount, &mode);
+			if (compressed > compressedEnd || symbolCount > outBufferSize)
+				return nullptr;
+
+			if (mode == ENTROPY_RAW) {
+				if (compressedEnd - compressed < symbolCount)
+					return nullptr;
+				const uint8_t* outData = compressed;
+				compressed += symbolCount;
+				streamEnd = compressed;
+				return outData;
+			}
+
+			if (mode == ENTROPY_HUFFMAN) {
+				if (!outBuffer) {
+					try {
+						outBuffer = new uint8_t[outBufferSize];
+					}
+					catch (const std::bad_alloc& e) {
+						return nullptr;
+					}
+				}
+				//The -6 is because huffman decoder can write a few more symbols than needed
+				if (symbolCount > outBufferSize - 6)
+					return nullptr;
+				streamEnd = outBuffer + symbolCount;
+
+				HuffmanDecodeSymbol symbols[256];
+				int err = decode_huffman_tree(symbols, compressed, compressedEnd);
+				if (err)
+					return nullptr;
+
+				const uint32_t streamSizeA = read_uint16le(compressed + 0);
+				const uint32_t streamSizeB = read_uint16le(compressed + 2);
+				const uint32_t streamSizeC = read_uint16le(compressed + 4);
+				const uint32_t streamSizeD = read_uint16le(compressed + 6);
+				const uint32_t streamSizeE = read_uint16le(compressed + 8);
+				const uint32_t streamSizeF = read_uint16le(compressed + 10);
+				const size_t totalStreamSize = streamSizeA + streamSizeB + streamSizeC + streamSizeD + streamSizeE + streamSizeF;
+				const uint8_t* const compressedEnd = compressed + 12 + totalStreamSize;
+
+				err = decode_symbols(symbols, symbolCount, compressed, outBuffer);
+				compressed = compressedEnd;
+				return err ? nullptr : outBuffer;
+			}
+
+			return nullptr;
+		}
+	};
 
 	const int8_t inc32table[16] = { 0, 1, 2, 1, 0,  4,  4,  4, 4, 4, 4, 4, 4, 4, 4, 4 };
 	const int8_t inc64table[16] = { 0, 0, 0, 1, 4, -1, -2, -3, 4, 4, 4, 4, 4, 4, 4, 4 };
-
-	//Optimized for long matches
-	FORCE_INLINE void copy_match(uint8_t*& dst, const uint8_t*& match, const uint8_t* const copyEnd, const size_t offset) {
-
-		//If the offset is big enough we can perform a faster copy
-		if (offset >= 16) {
-			do {
-				memcpy(dst, match, 16);
-				memcpy(dst + 16, match + 16, 16);
-				match += 32;
-				dst += 32;
-			} while (dst < copyEnd);
-		}
-		//Else it is a run-length type match
-		else {
-
-			dst[0] = match[0];
-			dst[1] = match[1];
-			dst[2] = match[2];
-			dst[3] = match[3];
-			match += inc32table[offset];
-			memcpy(dst + 4, match, 4);
-			match += inc64table[offset];
-			memcpy(dst + 8, match, 8);
-
-			dst += 16;
-			match += 8;
-			do {
-				memcpy(dst, match, 8);
-				memcpy(dst + 8, match + 8, 8);
-				match += 16;
-				dst += 16;
-			} while (dst < copyEnd);
-		}
-	}
 
 	//For 64bit this wont read more than 10 bytes
 	FORCE_INLINE size_t decode_length(const uint8_t*& compressed) {
@@ -2349,19 +3310,14 @@ namespace skanda {
 		}
 	}
 
-	int decompress(const uint8_t* compressed, size_t compressedSize, uint8_t* decompressed,
-		size_t decompressedSize, ProgressCallback* progress) {
-
-		ProgressCallback defaultProgress;
-		if (!progress)
-			progress = &defaultProgress;
-
+	int decompress(const uint8_t* compressed, size_t compressedSize, uint8_t* decompressed, 
+		size_t decompressedSize, ProgressCallback* progress) 
+	{
 		//Only last bytes are present
 		if (decompressedSize <= SKANDA_LAST_BYTES) {
 			if (compressedSize < decompressedSize)
 				return -1;
 			memcpy(decompressed, compressed, decompressedSize);
-			progress->progress(decompressedSize, decompressedSize);
 			return 0;
 		}
 
@@ -2371,126 +3327,189 @@ namespace skanda {
 		const uint8_t* const decompressedStart = decompressed;
 		const uint8_t* const decompressedEnd = decompressed + decompressedSize - SKANDA_LAST_BYTES;
 		const uint8_t* const compressedEnd = compressed + compressedSize - SKANDA_LAST_BYTES;
-		const uint8_t* nextProgressReport = (decompressedEnd - decompressed < SKANDA_PROGRESS_REPORT_PERIOD) ?
-			decompressedEnd : decompressed + SKANDA_PROGRESS_REPORT_PERIOD;
+		//First byte is uncompressed
+		*decompressed++ = *compressed++;
 
+		HuffmanDecoder literalDecoder(MAX_BLOCK_SIZE + 128);
+		HuffmanDecoder tokenDecoder(MAX_BLOCK_SIZE / 2 + 128);
+		HuffmanDecoder lengthDecoder(MAX_BLOCK_SIZE / 8 + 128);
+		HuffmanDecoder distanceDecoder(MAX_BLOCK_SIZE * 1.5 + 128);
 		size_t distance = 1;
-		size_t length;  //Stores the literal run length and match length
+		
+		while (decompressed < decompressedEnd) {
 
-		while (true) {
+			size_t thisBlockSize = read_uint32le(compressed);
+			compressed += 4;
+			const uint8_t* const thisBlockEnd = decompressed + thisBlockSize;
 
-			const size_t token = *compressed++;
-			length = token >> 5;
+			const uint8_t* literalStreamEnd;
+			const uint8_t* tokenStreamEnd;
+			const uint8_t* lengthStreamEnd;
+			const uint8_t* distanceStreamEnd;
+			const uint8_t* literalStreamIt = literalDecoder.decode(compressed, compressedEnd, literalStreamEnd);
+			if (literalStreamIt == nullptr)
+				return -1;
+			const uint8_t* tokenStreamIt = tokenDecoder.decode(compressed, compressedEnd, tokenStreamEnd);
+			if (tokenStreamIt == nullptr)
+				return -1;
+			const uint8_t* lengthStreamIt = lengthDecoder.decode(compressed, compressedEnd, lengthStreamEnd);
+			if (lengthStreamIt == nullptr)
+				return -1;
+			const uint8_t* distanceStreamIt = distanceDecoder.decode(compressed, compressedEnd, distanceStreamEnd);
+			if (distanceStreamIt == nullptr)
+				return -1;
 
-			if (unlikely(length == 7)) {
+			while (true) {
 
-				length += decode_length(compressed);
-				memcpy(decompressed, compressed, 16);
-				memcpy(decompressed + 16, compressed + 16, 16);
+				const size_t token = *tokenStreamIt++;
+				if (unlikely(tokenStreamIt > tokenStreamEnd))
+					return -1;
+				size_t length = token >> 5;
 
-				if (unlikely(length > 32)) {
+				if (unlikely(length == 7)) {
 
-					//We dont have the guarantee that compressedEnd >= compressed or decompressed < decompressedEnd
-					if (unlikely(compressed > compressedEnd || decompressed > decompressedEnd ||
-						compressedEnd - compressed < length || decompressedEnd - decompressed < length)) {
+					length += decode_length(lengthStreamIt);
+					//Detect buffer overflows
+					if (unlikely(lengthStreamIt > lengthStreamEnd) || unlikely(literalStreamEnd - literalStreamIt < length))
 						return -1;
+					memcpy(decompressed, literalStreamIt, 16);
+					memcpy(decompressed + 16, literalStreamIt + 16, 16);
+
+					if (unlikely(length > 32)) {
+
+						//For long copies make sure we have space. For length < 32 this is not necessary as the end buffer is 64 bytes.
+						//Here it is possible we went beyond the block end because of match copy
+						if (unlikely(decompressed > thisBlockEnd) || unlikely(thisBlockEnd - decompressed < length))
+							return -1;
+
+						uint8_t* dst = decompressed + 32;
+						const uint8_t* src = literalStreamIt + 32;
+						uint8_t* const end = decompressed + length;
+						do {
+							memcpy(dst, src, 16);
+							memcpy(dst + 16, src + 16, 16);
+							src += 32;
+							dst += 32;
+						} while (dst < end);
 					}
 
-					uint8_t* dst = decompressed + 32;
-					const uint8_t* src = compressed + 32;
-					uint8_t* const end = decompressed + length;
-					do {
-						memcpy(dst, src, 16);
-						memcpy(dst + 16, src + 16, 16);
-						src += 32;
-						dst += 32;
-					} while (dst < end);
+					decompressed += length;
+					literalStreamIt += length;
 				}
-			}
-			else {
-				//If the cpu supports fast unaligned access, it is faster to copy a 
-				// fixed amount of bytes instead of the needed amount
-				memcpy(decompressed, compressed, 8);
-			}
-			decompressed += length;
-			compressed += length;
+				else {
+					memcpy(decompressed, literalStreamIt, 8);
+					decompressed += length;
+					literalStreamIt += length;
+					//Detect buffer overflows
+					if (unlikely(literalStreamIt > literalStreamEnd))
+						return -1;
+				}
 
-			if (unlikely(decompressed >= nextProgressReport)) {
-				if (progress->progress(decompressed - decompressedStart, compressed - (compressedEnd - compressedSize)))
-					return 0;
+				if (unlikely(decompressed >= thisBlockEnd)) {
+					if (progress) {
+						if (progress->progress(decompressed - decompressedStart, compressed - (compressedEnd - compressedSize)))
+							return 0;
+					}
 
-				nextProgressReport = (decompressedEnd - decompressed < SKANDA_PROGRESS_REPORT_PERIOD) ?
-					decompressedEnd : decompressed + SKANDA_PROGRESS_REPORT_PERIOD;
-
-				if (decompressed >= decompressedEnd) {
-					//The maximum number of bytes that can be written in a single iteration
-					// (excluding long match lengths or long literal runs) 
-					// is 32 from match and 32 from literal run.
-					//There is just enough end buffer to not write out of bounds.
-					if (decompressed > decompressedEnd || compressed > compressedEnd)
+					//Overflow
+					if (decompressed > thisBlockEnd) 
 						return -1;
 					break;
 				}
-			}
 
-			//The maximum number of bytes that can be read in a single iteration
-			// (excluding long literal runs) is 1 from token, 32 from literals,
-			// 3 from distance, and 10 from match length. This is less than the end buffer,
-			// so this one check is enough.
-			if (unlikely(compressed > compressedEnd))
-				return -1;
-			
-            size_t distanceBytes, newDistance;
-			if (HAS_BMI) {
-#ifdef COMPILE_WITH_BMI
-				distanceBytes = _bextr_u32(token, 3, 2);
-				newDistance = _bzhi_u32(read_uint32le(compressed), distanceBytes * 8);
-#endif
-			}
-			else {
-				distanceBytes = (token >> 3) & 0x3;
-				newDistance = read_uint32le(compressed) & (1 << distanceBytes * 8) - 1;
-			}
-			length = (token & 0x7) + SKANDA_MIN_MATCH_LENGTH;
-			distance = distanceBytes ? newDistance : distance;
-			compressed += distanceBytes;
-			const uint8_t* match = decompressed - distance;
+				size_t distanceBytes = token & 0x18;
+				size_t newDistance = read_uint32le(distanceStreamIt) & (1 << distanceBytes) - 1;
+				length = token & 0x7;
+				const bool useRepDistance = distanceBytes == 0;
+				distance = (0 - useRepDistance & (distance ^ newDistance)) ^ newDistance;  //branchless selection
+				distanceStreamIt += distanceBytes >> 3;
+				const uint8_t* match = decompressed - distance;
 
-			if (unlikely(decompressed - decompressedStart < distance))
-				return -1;
-
-			if (length == 7 + SKANDA_MIN_MATCH_LENGTH) {
-				length += decode_length(compressed);
-				//We have the guarantee that decompressed < decompressedEnd, so there is no overflow
-				if (unlikely(decompressedEnd - decompressed < length))
+				//Detect buffer overflows
+				if (unlikely(decompressed - decompressedStart < distance) || unlikely(distanceStreamIt > distanceStreamEnd)) 
 					return -1;
-				uint8_t* const copyEnd = decompressed + length;
-				copy_match(decompressed, match, copyEnd, distance);
-				decompressed = copyEnd;
-			}
-			else {
-				//If the distance is big enough we can perform a faster copy
-				if (likely(distance >= 8))
-					memcpy(decompressed, match, 8);
-				//Else it is a run-length type match
-				else {
-					decompressed[0] = match[0];
-					decompressed[1] = match[1];
-					decompressed[2] = match[2];
-					decompressed[3] = match[3];
-					match += inc32table[distance];
-					memcpy(decompressed + 4, match, 4);
+
+				if (length == 7) {
+					length = decode_length(lengthStreamIt) + SKANDA_MIN_MATCH_LENGTH + 7;
+					//Detect buffer overflows
+					if (unlikely(lengthStreamIt > lengthStreamEnd))
+						return -1;
+					uint8_t* const copyEnd = decompressed + length;
+
+					//If the distance is big enough we can perform a faster copy
+					if (likely(distance >= 16)) {
+						//Common case length <= 32: omit some instructions
+						memcpy(decompressed, match, 16);
+						memcpy(decompressed + 16, match + 16, 16);
+
+						if (length > 32) {
+							//We have the guarantee that decompressed < thisBlockEnd, so there is no overflow
+							if (unlikely(thisBlockEnd - decompressed < length)) 
+								return -1;
+							match += 32;
+							decompressed += 32;
+
+							do {
+								memcpy(decompressed, match, 16);
+								memcpy(decompressed + 16, match + 16, 16);
+								match += 32;
+								decompressed += 32;
+							} while (decompressed < copyEnd);
+						}
+					}
+					//Else it is a run-length type match
+					else {
+						decompressed[0] = match[0];
+						decompressed[1] = match[1];
+						decompressed[2] = match[2];
+						decompressed[3] = match[3];
+						match += inc32table[distance];
+						memcpy(decompressed + 4, match, 4);
+						match += inc64table[distance];
+						memcpy(decompressed + 8, match, 8);
+
+						if (length > 16) {
+
+							//We have the guarantee that decompressed < decompressedEnd, so there is no overflow
+							if (unlikely(thisBlockEnd - decompressed < length))
+								return -1;
+
+							decompressed += 16;
+							match += 8;
+							do {
+								memcpy(decompressed, match, 8);
+								memcpy(decompressed + 8, match + 8, 8);
+								match += 16;
+								decompressed += 16;
+							} while (decompressed < copyEnd);
+						}
+					}
+
+					decompressed = copyEnd;
 				}
-				decompressed += length;
+				else {
+					//If the distance is big enough we can perform a faster copy
+					if (likely(distance >= 8))
+						memcpy(decompressed, match, 8);
+					//Else it is a run-length type match
+					else {
+						decompressed[0] = match[0];
+						decompressed[1] = match[1];
+						decompressed[2] = match[2];
+						decompressed[3] = match[3];
+						match += inc32table[distance];
+						memcpy(decompressed + 4, match, 4);
+					}
+					decompressed += length + SKANDA_MIN_MATCH_LENGTH;
+				}
 			}
 		}
 
 		memcpy(decompressed, compressed, SKANDA_LAST_BYTES);
-		progress->progress(decompressedSize, compressed - (compressedEnd - compressedSize));
 		return 0;
 	}
 }
 
-#endif  //SKANDA_IMPLEMENTATION
+#endif  //SKANDAIMPLEMENTATION
 
 #endif  //__SKANDA__
