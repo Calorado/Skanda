@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <iomanip>
 #include <vector>
+#include <cmath>
 
 using namespace std;
 
@@ -36,7 +37,10 @@ size_t compress_bound(size_t inSize) {
 #define SKANDA_IMPLEMENTATION
 #include "Skanda.h"
 size_t skanda_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
-    return skanda::compress(in, inSize, out, level);
+    if (level < 10)
+        return skanda::compress(in, inSize, out, level);
+    else
+        return skanda::compress(in, inSize, out, level % 10, (float)(level / 10) / 100);
 }
 int skanda_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSize) {
     return skanda::decompress(com, comSize, dec, decSize);
@@ -74,17 +78,17 @@ size_t spectrum_strider_backend(const uint8_t* data, const size_t size) {
     catch (std::bad_alloc& e) {
         return 0;
     }
-    size_t compressed = strider::compress(data, size, out, 0);
+    size_t compressed = strider::compress(data, size, out, 6);
     delete[] out;
     return compressed;
 }
 size_t spectrum_strider_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
     spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, 0, 768, 256, 96, false };
-    spectrum::EncoderOptions spectrumOptionsB = { &spectrum_strider_backend, 16384, 32768, 384, 128, 0, true };
+    spectrum::EncoderOptions spectrumOptionsB = { &spectrum_strider_backend, 16384, 32768, /*384*/256, /*128*/64, 0, true };
     uint8_t* spectrumOut = new uint8_t[spectrum::bound(inSize)];
     size_t spectrumSize = spectrum::encode(in, inSize, spectrumOut, level >= 6 ? spectrumOptionsB : spectrumOptionsA);
     memcpy(out, &spectrumSize, sizeof(size_t));
-    size_t striderSize = strider::compress(spectrumOut, spectrumSize, out + 8, 0);
+    size_t striderSize = strider::compress(spectrumOut, spectrumSize, out + 8, level);
     delete[] spectrumOut;
     return striderSize + sizeof(size_t);
 }
@@ -110,7 +114,7 @@ size_t lz4_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
         return LZ4_compress_fast((char*)in, (char*)out, inSize, compress_bound(inSize), -level);
     else if (level <= 1)
         return LZ4_compress_default((char*)in, (char*)out, inSize, compress_bound(inSize));
-    return LZ4_compress_HC((char*)in, (char*)out, inSize, inSize, level);
+    return LZ4_compress_HC((char*)in, (char*)out, inSize, compress_bound(inSize), level);
 }
 int lz4_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSize) {
     return LZ4_decompress_safe((char*)com, (char*)dec, comSize, decSize) != decSize;
@@ -215,16 +219,16 @@ struct Compressor {
 
 unordered_map<string, Compressor> availableCompressors = {
 #ifndef NO_SKANDA
-	{ "skanda", { "0.6", &skanda_compress, &skanda_decompress } },
+	{ "skanda", { "0.7", &skanda_compress, &skanda_decompress } },
 #endif
 #ifndef NO_STRIDER
-	{ "strider", { "0.3", &strider_compress, &strider_decompress } },
+	{ "strider", { "0.4", &strider_compress, &strider_decompress } },
 #endif
 #ifndef NO_SPECTRUM
-	{ "spectrum", { "0.2_dev1", &spectrum_compress, &spectrum_decompress } },
+	{ "spectrum", { "0.2", &spectrum_compress, &spectrum_decompress } },
 #endif
 #if !defined(NO_STRIDER) && !defined(NO_SPECTRUM)
-	{ "spectrum_strider", { "0.3/0.2_dev1", &spectrum_strider_compress, &spectrum_strider_decompress } },
+	{ "spectrum_strider", { "0.4/0.2", &spectrum_strider_compress, &spectrum_strider_decompress } },
 #endif
 #ifndef NO_LZ4
 	{ "lz4", { "1.9.4", &lz4_compress, &lz4_decompress } },
@@ -233,10 +237,10 @@ unordered_map<string, Compressor> availableCompressors = {
 	{ "lizard", { "1.0", &lizard_compress, &lizard_decompress } },
 #endif
 #ifndef NO_ZSTD
-	{ "zstd", { "1.5.4", &zstd_compress, &zstd_decompress } },
+	{ "zstd", { "1.5.5", &zstd_compress, &zstd_decompress } },
 #endif
 #ifndef NO_LIBDEFLATE
-	{ "libdeflate", { "1.17", &libdeflate_compress, &libdeflate_decompress } },
+	{ "libdeflate", { "1.18", &libdeflate_compress, &libdeflate_decompress } },
 #endif
 #ifndef NO_LZMA
 	{ "lzma", { "22.01", &lzma_compress, &lzma_decompress } },
@@ -252,7 +256,7 @@ enum {
     TEST_TIME_LONG
 };
 
-void test_file(string path, string compressor, int level, int testTimeMode, size_t* compressedSize, double* compressTime, double* decompressTime, int* err) {
+void test_file(string path, string compressor, int level, int testTimeMode, size_t* compressedSize, double* compressTime, double* decompressTime, mutex* mtx) {
 
     fstream in(path, fstream::in | fstream::binary);
     size_t fileSize = filesystem::file_size(path);
@@ -270,14 +274,10 @@ void test_file(string path, string compressor, int level, int testTimeMode, size
     double nextWait = 0;
     double testTime = 0;
     if (testTimeMode != TEST_TIME_IMMEDIATE) {
-        if (testTimeMode == TEST_TIME_SHORT) {
-            const double MAX_TEST_TIME = 5e7; //0.05 seconds
-            const double ESTIMATED_SPEED = 2.5e7;  //25MB/s
-            testTime = std::min(MAX_TEST_TIME, (double)fileSize / ESTIMATED_SPEED * 1e9);
-        }
-        else {
+        if (testTimeMode == TEST_TIME_SHORT) 
+            testTime = 0;
+        else 
             testTime = 16 * 1e9; //16 seconds
-        }
     }
 
     double elapsedCTime = 0;
@@ -300,6 +300,7 @@ void test_file(string path, string compressor, int level, int testTimeMode, size
 
     nextWait = 0;
     double elapsedDTime = 0;
+    int decError = 0;
     *decompressTime = 1e100;
     do {
         if (testTimeMode != TEST_TIME_IMMEDIATE && elapsedDTime > nextWait) {
@@ -307,7 +308,7 @@ void test_file(string path, string compressor, int level, int testTimeMode, size
             nextWait += ceil(elapsedDTime * 10) / 10;  //Every 100 millis
         }
         auto timeStart = chrono::high_resolution_clock::now();
-        *err = availableCompressors[compressor].decompress(compressed, *compressedSize, decompressed, fileSize);
+        decError = availableCompressors[compressor].decompress(compressed, *compressedSize, decompressed, fileSize);
         double time = (chrono::high_resolution_clock::now() - timeStart).count();
 
         elapsedDTime += time;
@@ -315,8 +316,11 @@ void test_file(string path, string compressor, int level, int testTimeMode, size
             *decompressTime = time;
     } while (elapsedDTime < testTime);
 
-    if (!std::equal(data, data + fileSize, decompressed))
-        *err = true;
+    if (decError || !std::equal(data, data + fileSize, decompressed)) {
+        mtx->lock();
+        cout << "\n Error at file " << path << ", decoder return code: " << decError << ", correct bytes: " << std::mismatch(data, data + fileSize, decompressed).first - data;
+        exit(0);
+    }
 
     delete[] data;
     delete[] compressed;
@@ -326,8 +330,8 @@ void test_file(string path, string compressor, int level, int testTimeMode, size
 struct CompressorResults {
     string compressor;
     int level = 0;
-    size_t processedData = 0;
-    size_t compressedSize = 0;
+    uint64_t processedData = 0;
+    uint64_t compressedSize = 0;
     double totalCTime = 0;
     double totalDTime = 0;
 };
@@ -345,21 +349,16 @@ void benchmark_thread(vector<string>* fileList, size_t* fileIt, vector<Compresso
         *fileIt += 1;
         mtx->unlock();
 
+        mtx->lock();
+        cout << "\n\n File: " << fileList->at(thisFile);
+        mtx->unlock();
+
         size_t compressedSize;
         double compressTime;
         double decompressTime;
-        int err;
-        test_file(fileList->at(thisFile), compressor->compressor, compressor->level, testTimeMode, &compressedSize, &compressTime, &decompressTime, &err);
-        
-        if (err) {
-            mtx->lock();
-            cout << "\n\n Error in file: " << fileList->at(thisFile);
-            mtx->unlock();
-            exit(0);
-        }
+        test_file(fileList->at(thisFile), compressor->compressor, compressor->level, testTimeMode, &compressedSize, &compressTime, &decompressTime, mtx);
 
         mtx->lock();
-        cout << "\n\n File: " << fileList->at(thisFile);
         compressor->processedData += filesystem::file_size(fileList->at(thisFile));
         compressor->compressedSize += compressedSize;
         compressor->totalCTime += compressTime;
@@ -438,7 +437,7 @@ int main()
         SET_REALTIME_PRIO;
 
     for (auto compressorsIt = compressorsToRun.begin(); compressorsIt != compressorsToRun.end(); compressorsIt++) {
-        int concurrency = multithread ? thread::hardware_concurrency() : 1;
+        int concurrency = multithread ? thread::hardware_concurrency() / 2 : 1;
         thread* cpu = new thread[concurrency];
 
         size_t fileIt = 0;
