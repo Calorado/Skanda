@@ -1,6 +1,6 @@
 # Skanda
 
-Skanda is an experimental compression algorithm, trying to improve upon the Lizard algorithm. Depending on the speed/ratio tradeoff selected it can range from 75% of LZ4 speed with Deflate ratios to a bit faster than Zstd with a bit less compression.
+Skanda is an experimental compression algorithm, kinda like an spiritual successor to Lizard. Depending on the speed/ratio tradeoff selected it can range from 80% of LZ4 speed with close to Deflate ratios, to similar to Zstd ratios at double the decode speed.
 
 Note that due to being experimental I cannot guarantee backwards/forwards compatibility, or good support for older or less common compiler/architectures.
 
@@ -56,35 +56,37 @@ The algorithm was benchmarked on Windows 11, on a Ryzen 6900HX@3.3GHz and compil
 
 | Compressor name         | Compression| Decompress.| Compr. size | Ratio |
 | ---------------         | -----------| -----------| ----------- | ----- | 
-| **skanda 0.7 -0 speed_bias=1** | 519.11MiB/s | 2383.56MiB/s | 94113718 | 44.40 |
-| **skanda 0.7 -3 speed_bias=1** | 96.42MiB/s | 2128.53MiB/s | 77248707 | 36.45 |
-| **skanda 0.7 -5 speed_bias=1** | 19.84MiB/s | 2139.77MiB/s | 70610209 | 33.31 |
-| **skanda 0.7 -7 speed_bias=1** | 3.60MiB/s | 2065.94MiB/s | 65134961 | 30.73 |
-| **skanda 0.7 -9 speed_bias=1** | 2.09MiB/s | 2006.48MiB/s | 63540928 | 29.98 |
-| **skanda 0.7 -0 speed_bias=0.35** | 344.33MiB/s | 1474.11MiB/s | 76696378 | 36.19 |
-| **skanda 0.7 -3 speed_bias=0.35** | 91.37MiB/s | 1630.88MiB/s | 66321779 | 31.29 |
-| **skanda 0.7 -5 speed_bias=0.35** | 19.78MiB/s | 1670.19MiB/s | 61546799 | 29.04 |
-| **skanda 0.7 -7 speed_bias=0.35** | 3.18MiB/s | 1689.51MiB/s | 58003260 | 27.37 |
-| **skanda 0.7 -9 speed_bias=0.35** | 1.92MiB/s | 1640.28MiB/s | 56591343 | 26.70 |
-| lz4 1.9.4 -1 | 534.21MiB/s | 2992.14MiB/s | 100880983 | 47.60 |
-| lz4 1.9.4 -2 | 100.48MiB/s | 2677.99MiB/s | 83804013 | 39.54 |
-| lz4 1.9.4 -4 | 66.39MiB/s | 2803.24MiB/s | 79808158 | 37.65 |
-| lz4 1.9.4 -8 | 31.06MiB/s | 2900.54MiB/s | 77957732 | 36.78 |
-| lz4 1.9.4 -12 | 9.35MiB/s | 2979.16MiB/s | 77262872 | 36.45 |
-| lizard 1.0 -20 | 329.14MiB/s | 1914.49MiB/s | 96927491 | 45.73 |
-| lizard 1.0 -23 | 49.60MiB/s | 1958.62MiB/s | 82079451 | 38.73 |
-| lizard 1.0 -26 | 4.93MiB/s | 2003.82MiB/s | 72564738 | 34.24 |
-| lizard 1.0 -29 | 1.62MiB/s | 1939.29MiB/s | 68942591 | 32.53 |
-| lizard 1.0 -40 | 237.66MiB/s | 1058.37MiB/s | 80847695 | 38.14 |
-| lizard 1.0 -43 | 45.45MiB/s | 1235.25MiB/s | 71816638 | 33.88 |
-| lizard 1.0 -46 | 7.57MiB/s | 1221.37MiB/s | 65572024 | 30.94 |
-| lizard 1.0 -49 | 1.48MiB/s | 1266.49MiB/s | 60859056 | 28.71 |
-| libdeflate 1.18 -1 | 183.02MiB/s | 731.20MiB/s | 73505591 | 34.68 |
-| libdeflate 1.18 -4 | 104.96MiB/s | 766.39MiB/s | 69471403 | 32.78 |
-| libdeflate 1.18 -8 | 30.99MiB/s | 764.57MiB/s | 66765105 | 31.50 |
-| libdeflate 1.18 -12 | 4.63MiB/s | 774.50MiB/s | 64678485 | 30.52 |
-| zstd 1.5.5 -1 | 349.89MiB/s | 860.82MiB/s | 73423309 | 34.64 |
-| zstd 1.5.5 -6 | 76.19MiB/s | 795.90MiB/s | 61481995 | 29.01 |
-| zstd 1.5.5 -12 | 21.84MiB/s | 837.13MiB/s | 58196278 | 27.46 |
-| zstd 1.5.5 -17 | 3.91MiB/s | 776.80MiB/s | 54284479 | 25.61 |
-| zstd 1.5.5 -22 | 1.54MiB/s | 725.87MiB/s | 52473367 | 24.76 |
+| **skanda 0.8 -speed-bias=1 -0** | 533.16MiB/s | 2656.77MiB/s | 94135957 | 44.41 |
+| **skanda 0.8 -speed-bias=1 -3** | 100.73MiB/s | 2451.41MiB/s | 78139070 | 36.87 |
+| **skanda 0.8 -speed-bias=1 -6** | 14.42MiB/s | 2597.87MiB/s | 71423098 | 33.70 |
+| **skanda 0.8 -speed-bias=1 -9** | 3.01MiB/s | 3038.08MiB/s | 67760675 | 31.97 |
+| **skanda 0.8 -speed-bias=0.5 -0** | 405.20MiB/s | 1883.58MiB/s | 80246607 | 37.86 |
+| **skanda 0.8 -speed-bias=0.5 -3** | 96.89MiB/s | 1936.61MiB/s | 67420657 | 31.81 |
+| **skanda 0.8 -speed-bias=0.5 -6** | 8.57MiB/s | 2086.66MiB/s | 61720628 | 29.12 |
+| **skanda 0.8 -speed-bias=0.5 -9** | 0.64MiB/s | 2094.89MiB/s | 57123123 | 26.95 |
+| **skanda 0.8 -speed-bias=0 -0** | 335.04MiB/s | 1356.30MiB/s | 74659786 | 35.23 |
+| **skanda 0.8 -speed-bias=0 -3** | 92.94MiB/s | 1407.94MiB/s | 63615902 | 30.01 |
+| **skanda 0.8 -speed-bias=0 -6** | 8.53MiB/s | 1519.94MiB/s | 57811563 | 27.28 |
+| **skanda 0.8 -speed-bias=0 -9** | 0.55MiB/s | 1481.58MiB/s | 52771100 | 24.90 |
+| lz4 1.9.4 -1 | 553.23MiB/s | 3382.70MiB/s | 100880983 | 47.60 |
+| lz4 1.9.4 -2 | 104.09MiB/s | 3009.71MiB/s | 83804013 | 39.54 |
+| lz4 1.9.4 -4 | 69.34MiB/s | 3151.82MiB/s | 79808158 | 37.65 |
+| lz4 1.9.4 -8 | 32.83MiB/s | 3263.93MiB/s | 77957732 | 36.78 |
+| lz4 1.9.4 -12 | 9.68MiB/s | 3336.39MiB/s | 77262872 | 36.45 |
+| lizard 1.0 -20 | 330.36MiB/s | 2049.21MiB/s | 96927491 | 45.73 |
+| lizard 1.0 -23 | 50.10MiB/s | 2093.62MiB/s | 82079451 | 38.73 |
+| lizard 1.0 -26 | 5.04MiB/s | 2147.43MiB/s | 72564738 | 34.24 |
+| lizard 1.0 -29 | 1.64MiB/s | 2069.80MiB/s | 68942591 | 32.53 |
+| lizard 1.0 -40 | 235.59MiB/s | 1103.63MiB/s | 80847695 | 38.14 |
+| lizard 1.0 -43 | 46.60MiB/s | 1325.95MiB/s | 71816638 | 33.88 |
+| lizard 1.0 -46 | 7.70MiB/s | 1313.61MiB/s | 65572024 | 30.94 |
+| lizard 1.0 -49 | 1.39MiB/s | 1367.12MiB/s | 60859056 | 28.71 |
+| libdeflate 1.18 -1 | 193.71MiB/s | 741.68MiB/s | 73505591 | 34.68 |
+| libdeflate 1.18 -4 | 109.05MiB/s | 780.81MiB/s | 69471403 | 32.78 |
+| libdeflate 1.18 -8 | 30.72MiB/s | 780.20MiB/s | 66765105 | 31.50 |
+| libdeflate 1.18 -12 | 4.82MiB/s | 789.02MiB/s | 64678485 | 30.52 |
+| zstd 1.5.5 -1 | 360.13MiB/s | 861.60MiB/s | 73423309 | 34.64 |
+| zstd 1.5.5 -6 | 74.28MiB/s | 796.59MiB/s | 61543204 | 29.04 |
+| zstd 1.5.5 -12 | 19.94MiB/s | 812.60MiB/s | 58211131 | 27.46 |
+| zstd 1.5.5 -17 | 4.09MiB/s | 757.63MiB/s | 54284479 | 25.61 |
+| zstd 1.5.5 -22 | 1.69MiB/s | 724.07MiB/s | 52473367 | 24.76 |
