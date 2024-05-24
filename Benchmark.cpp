@@ -26,21 +26,31 @@
 #include <iomanip>
 #include <vector>
 #include <cmath>
+#include <random>
+#include <atomic>
 
 using namespace std;
 
 size_t compress_bound(size_t inSize) {
-    return inSize + inSize / 2 + 1024;
+    return inSize + inSize / 16 + 1024;
 }
+
+#define NO_SPECTRUM
+//#define NO_STRIDER
+//#define NO_SKANDA
+//#define NO_LZ4
+#define NO_LIZARD
+//#define NO_ZSTD
+//#define NO_LIBDEFLATE
+//#define NO_LZMA
+//#define NO_LZHAM
+//#define NO_LZAV
 
 #ifndef NO_SKANDA
 #define SKANDA_IMPLEMENTATION
 #include "Skanda.h"
 size_t skanda_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
-    if (level < 10)
-        return skanda::compress(in, inSize, out, level);
-    else
-        return skanda::compress(in, inSize, out, level % 10, (float)(level / 10) / 100);
+    return skanda::compress(in, inSize, out, level % 10, (float)(level / 10) / 100);
 }
 int skanda_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSize) {
     return skanda::decompress(com, comSize, dec, decSize);
@@ -69,6 +79,60 @@ int spectrum_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSi
 }
 #endif
 
+#if !defined(NO_SKANDA) && !defined(NO_SPECTRUM)
+size_t spectrum_skanda_backend(const uint8_t* data, const size_t size) {
+    uint8_t* out;
+    try {
+        out = new uint8_t[compress_bound(size)];
+    }
+    catch (std::bad_alloc& e) {
+        return 0;
+    }
+    size_t compressed = skanda::compress(data, size, out, 2);
+    delete[] out;
+    return compressed;
+}
+size_t spectrum_skanda_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
+    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, 512, 256, false, true };
+    spectrum::EncoderOptions spectrumOptionsB = { &spectrum_skanda_backend, 16384, 512, 256, true, true };
+
+    uint8_t* spectrumOut = new uint8_t[spectrum::encode_bound(inSize)];
+    size_t spectrumSize = spectrum::encode(in, inSize, spectrumOut, level % 10 >= 5 ? spectrumOptionsB : spectrumOptionsA);
+    size_t skandaSize;
+
+    if (spectrum::is_error(spectrumSize)) {
+        spectrumSize = 0;
+        memcpy(out, &spectrumSize, sizeof(size_t));
+        skandaSize = skanda::compress(in, inSize, out + sizeof(size_t), level % 10, (float)(level / 10) / 100);
+    }
+    else {
+        memcpy(out, &spectrumSize, sizeof(size_t));
+        skandaSize = skanda::compress(spectrumOut, spectrumSize, out + sizeof(size_t), level % 10, (float)(level / 10) / 100);
+    }
+    
+    delete[] spectrumOut;
+    return skandaSize + sizeof(size_t);
+}
+int spectrum_skanda_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSize) {
+    size_t spectrumSize;
+    memcpy(&spectrumSize, com, sizeof(size_t));
+
+    if (spectrumSize == 0) {
+        if (skanda::decompress(com + sizeof(size_t), comSize - sizeof(size_t), dec, decSize))
+            return -1;
+    }
+    else {
+        uint8_t* spectrumOut = new uint8_t[spectrumSize];
+        if (skanda::decompress(com + sizeof(size_t), comSize - sizeof(size_t), spectrumOut, spectrumSize))
+            return -1;
+        if (spectrum::decode(spectrumOut, spectrumSize, dec, decSize))
+            return -1;
+        delete[] spectrumOut;
+    }
+    return 0;
+}
+#endif
+
 #if !defined(NO_STRIDER) && !defined(NO_SPECTRUM)
 size_t spectrum_strider_backend(const uint8_t* data, const size_t size) {
     uint8_t* out;
@@ -78,15 +142,15 @@ size_t spectrum_strider_backend(const uint8_t* data, const size_t size) {
     catch (std::bad_alloc& e) {
         return 0;
     }
-    size_t compressed = strider::compress(data, size, out, 6);
+    size_t compressed = strider::compress(data, size, out, 4);
     delete[] out;
     return compressed;
 }
 size_t spectrum_strider_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
-    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, 0, 768, 256, 96, false };
-    spectrum::EncoderOptions spectrumOptionsB = { &spectrum_strider_backend, 16384, 32768, /*384*/256, /*128*/64, 0, true };
-    uint8_t* spectrumOut = new uint8_t[spectrum::bound(inSize)];
-    size_t spectrumSize = spectrum::encode(in, inSize, spectrumOut, level >= 6 ? spectrumOptionsB : spectrumOptionsA);
+    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, 1024, 256, false };
+    spectrum::EncoderOptions spectrumOptionsB = { &spectrum_strider_backend, 16384, 512, 256, true };
+    uint8_t* spectrumOut = new uint8_t[spectrum::encode_bound(inSize)];
+    size_t spectrumSize = spectrum::encode(in, inSize, spectrumOut, level >= 5 ? spectrumOptionsB : spectrumOptionsA);
     memcpy(out, &spectrumSize, sizeof(size_t));
     size_t striderSize = strider::compress(spectrumOut, spectrumSize, out + 8, level);
     delete[] spectrumOut;
@@ -211,6 +275,18 @@ int lzham_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSize)
 }
 #endif
 
+#ifndef NO_LZAV
+#include "lzav.h"
+size_t lzav_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
+    if (level == 0)
+        return lzav_compress_default(in, out, inSize, compress_bound(inSize));
+    return lzav_compress_hi(in, out, inSize, compress_bound(inSize));
+}
+int lzav_decode(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSize) {
+    return lzav_decompress(com, dec, comSize, decSize) != decSize;
+}
+#endif
+
 struct Compressor {
     string version;
     size_t(*compress)(uint8_t*, size_t, uint8_t*, int);
@@ -219,16 +295,19 @@ struct Compressor {
 
 unordered_map<string, Compressor> availableCompressors = {
 #ifndef NO_SKANDA
-	{ "skanda", { "0.7", &skanda_compress, &skanda_decompress } },
+	{ "skanda", { "0.9", &skanda_compress, &skanda_decompress } },
 #endif
 #ifndef NO_STRIDER
-	{ "strider", { "0.4", &strider_compress, &strider_decompress } },
+	{ "strider", { "0.5", &strider_compress, &strider_decompress } },
 #endif
 #ifndef NO_SPECTRUM
 	{ "spectrum", { "0.2", &spectrum_compress, &spectrum_decompress } },
 #endif
+#if !defined(NO_SKANDA) && !defined(NO_SPECTRUM)
+    { "spectrum_skanda", { "0.9/0.2", &spectrum_skanda_compress, &spectrum_skanda_decompress } },
+#endif
 #if !defined(NO_STRIDER) && !defined(NO_SPECTRUM)
-	{ "spectrum_strider", { "0.4/0.2", &spectrum_strider_compress, &spectrum_strider_decompress } },
+	{ "spectrum_strider", { "0.5/0.2", &spectrum_strider_compress, &spectrum_strider_decompress } },
 #endif
 #ifndef NO_LZ4
 	{ "lz4", { "1.9.4", &lz4_compress, &lz4_decompress } },
@@ -237,10 +316,10 @@ unordered_map<string, Compressor> availableCompressors = {
 	{ "lizard", { "1.0", &lizard_compress, &lizard_decompress } },
 #endif
 #ifndef NO_ZSTD
-	{ "zstd", { "1.5.5", &zstd_compress, &zstd_decompress } },
+	{ "zstd", { "1.5.6", &zstd_compress, &zstd_decompress } },
 #endif
 #ifndef NO_LIBDEFLATE
-	{ "libdeflate", { "1.18", &libdeflate_compress, &libdeflate_decompress } },
+	{ "libdeflate", { "1.20", &libdeflate_compress, &libdeflate_decompress } },
 #endif
 #ifndef NO_LZMA
 	{ "lzma", { "22.01", &lzma_compress, &lzma_decompress } },
@@ -248,78 +327,109 @@ unordered_map<string, Compressor> availableCompressors = {
 #ifndef NO_LZHAM
 	{ "lzham", { "1.0", &lzham_compress, &lzham_decompress } },
 #endif
+#ifndef NO_LZAV
+    { "lzav", { "4.0", &lzav_compress, &lzav_decode } },
+#endif
 };
 
 enum {
-    TEST_TIME_IMMEDIATE = 0,
-    TEST_TIME_SHORT,
-    TEST_TIME_LONG
+    TEST_TIME,
+    TEST_MULTITHREAD,
+    TEST_FUZZER,
 };
 
-void test_file(string path, string compressor, int level, int testTimeMode, size_t* compressedSize, double* compressTime, double* decompressTime, mutex* mtx) {
+uint64_t generate_random_number() {
+    std::random_device r;
+    std::default_random_engine e(r());
+    std::uniform_int_distribution<uint64_t> dist(0, UINT64_MAX);
+    return dist(e);
+}
 
+void test_file(string path, size_t off, string compressorName, int level, int testMode, size_t blockSize, 
+    size_t* compressedSize, double* compressTime, double* decompressTime, mutex* mtx) 
+{
     fstream in(path, fstream::in | fstream::binary);
-    size_t fileSize = filesystem::file_size(path);
-    uint8_t* data = new uint8_t[fileSize];
-    in.read((char*)data, fileSize);
+    if (!in.is_open()) {
+        mtx->lock();
+        std::cout << "\n Could not open file " << path;
+        exit(0);
+    }
+    in.seekg(off);
+    uint8_t* data = new uint8_t[blockSize];
+    in.read((char*)data, blockSize);
+    in.close();
 
-    uint8_t* compressed = new uint8_t[compress_bound(fileSize)];
-    uint8_t* decompressed = new uint8_t[fileSize];
+    uint8_t* compressed = new uint8_t[compress_bound(blockSize)];
+    uint8_t* decompressed = new uint8_t[blockSize];
     //Have the buffers be physically allocated
-    for (size_t i = 0; i < fileSize; i++) {
-        compressed[i] = i;
-        decompressed[i] = i;
+    memset(compressed, 0, compress_bound(blockSize));
+    memset(decompressed, 0, blockSize);
+
+    auto compressor = availableCompressors.find(compressorName);
+    if (compressor == availableCompressors.end()) {
+        mtx->lock();
+        std::cout << "\n Compressor " << compressorName << " not found";
+        exit(0);
     }
 
-    double nextWait = 0;
-    double testTime = 0;
-    if (testTimeMode != TEST_TIME_IMMEDIATE) {
-        if (testTimeMode == TEST_TIME_SHORT) 
-            testTime = 0;
-        else 
-            testTime = 16 * 1e9; //16 seconds
-    }
+    double maxTimeSinceBestTime = 0;
+    if (testMode == TEST_TIME)
+        maxTimeSinceBestTime = std::max((double)blockSize * 25, 5e4);  //Give 1 second for every 40MB of file and at least 50 microseconds
 
-    double elapsedCTime = 0;
+    double timeSinceBestTime = 0;
     *compressTime = 1e100;
     do {
-        //Give the processor to other processes every now and then, so
-        // that we can have it all for the benchmark
-        if (testTimeMode != TEST_TIME_IMMEDIATE && elapsedCTime > nextWait) {
-            std::this_thread::sleep_for(chrono::milliseconds(1));
-            nextWait += ceil(elapsedCTime * 10) / 10;  //Every 100 millis
-        }
-        auto timeStart = chrono::high_resolution_clock::now();
-        *compressedSize = availableCompressors[compressor].compress(data, fileSize, compressed, level);
-        double time = (chrono::high_resolution_clock::now() - timeStart).count();
+        auto timeStart = std::chrono::high_resolution_clock::now();
+        *compressedSize = compressor->second.compress(data, blockSize, compressed, level);
+        auto timeEnd = std::chrono::high_resolution_clock::now();
+        double time = (timeEnd - timeStart).count();
 
-        elapsedCTime += time;
-        if (time < *compressTime)
+        timeSinceBestTime += time;
+        bool breakLoop = timeSinceBestTime > maxTimeSinceBestTime || testMode != TEST_TIME;
+        if (time < *compressTime) {
             *compressTime = time;
-    } while (elapsedCTime < testTime);
+            timeSinceBestTime = 0;
+        }
+        if (breakLoop)
+            break;
+    } while (true);
 
-    nextWait = 0;
-    double elapsedDTime = 0;
+    if (testMode == TEST_FUZZER) {
+        uint64_t seed = generate_random_number();
+        std::cout << "\nTesting file: " << path << " Algo: " << compressorName + "," + to_string(level) + " Offset: " << off << " Length: " << blockSize << " Seed: " << seed;
+        //Introduce errors
+        int maxErrors = 3 + seed % (std::max(*compressedSize, (size_t)8) / 4);
+        for (int i = 0; i < maxErrors; i++) {
+            seed *= 0xff51afd7ed558ccd;
+            compressed[seed % *compressedSize] = seed % 256;
+        }
+    }
+
+    timeSinceBestTime = 0;
     int decError = 0;
     *decompressTime = 1e100;
     do {
-        if (testTimeMode != TEST_TIME_IMMEDIATE && elapsedDTime > nextWait) {
-            std::this_thread::sleep_for(chrono::milliseconds(1));
-            nextWait += ceil(elapsedDTime * 10) / 10;  //Every 100 millis
-        }
-        auto timeStart = chrono::high_resolution_clock::now();
-        decError = availableCompressors[compressor].decompress(compressed, *compressedSize, decompressed, fileSize);
-        double time = (chrono::high_resolution_clock::now() - timeStart).count();
+        auto timeStart = std::chrono::high_resolution_clock::now();
+        decError = compressor->second.decompress(compressed, *compressedSize, decompressed, blockSize);
+        auto timeEnd = std::chrono::high_resolution_clock::now();
+        double time = (timeEnd - timeStart).count();
 
-        elapsedDTime += time;
-        if (time < *decompressTime)
+        timeSinceBestTime += time;
+        bool breakLoop = timeSinceBestTime > maxTimeSinceBestTime || testMode != TEST_TIME;
+        if (time < *decompressTime) {
             *decompressTime = time;
-    } while (elapsedDTime < testTime);
+            timeSinceBestTime = 0;
+        }
+        if (breakLoop)
+            break;
+    } while (true);
 
-    if (decError || !std::equal(data, data + fileSize, decompressed)) {
-        mtx->lock();
-        cout << "\n Error at file " << path << ", decoder return code: " << decError << ", correct bytes: " << std::mismatch(data, data + fileSize, decompressed).first - data;
-        exit(0);
+    if (testMode != TEST_FUZZER) {
+        if (decError || !std::equal(data, data + blockSize, decompressed)) {
+            mtx->lock();
+            std::cout << "\n Error at file " << path << ", decoder return code: " << decError << ", correct bytes: " << std::mismatch(data, data + blockSize, decompressed).first - data << "\n";
+            exit(-1);
+        }
     }
 
     delete[] data;
@@ -337,7 +447,7 @@ struct CompressorResults {
 };
 
 void benchmark_thread(vector<string>* fileList, size_t* fileIt, vector<CompressorResults>* compressorsToRun, 
-    vector<CompressorResults>::iterator compressor, int testTimeMode, std::mutex* mtx) 
+    vector<CompressorResults>::iterator compressor, int testMode, size_t testBlockLog, std::mutex* mtx) 
 {
     while (true) {
         mtx->lock();
@@ -347,30 +457,42 @@ void benchmark_thread(vector<string>* fileList, size_t* fileIt, vector<Compresso
         }
         size_t thisFile = *fileIt;
         *fileIt += 1;
+        if (testMode == TEST_FUZZER && *fileIt == fileList->size())
+            *fileIt = 0;
+        if (testMode != TEST_FUZZER)
+            std::cout << "\n\n File: " << fileList->at(thisFile);
         mtx->unlock();
 
-        mtx->lock();
-        cout << "\n\n File: " << fileList->at(thisFile);
-        mtx->unlock();
+        uint64_t fileSize = filesystem::file_size(fileList->at(thisFile));
+        uint64_t compressedSize = 0;
+        double compressTime = 0;
+        double decompressTime = 0;
 
-        size_t compressedSize;
-        double compressTime;
-        double decompressTime;
-        test_file(fileList->at(thisFile), compressor->compressor, compressor->level, testTimeMode, &compressedSize, &compressTime, &decompressTime, mtx);
+        for (uint64_t pos = 0; pos < fileSize; pos += (1ull << testBlockLog)) {
+            size_t blockCompSize;
+            double blockEncTime, blockDecTime;
+            test_file(fileList->at(thisFile), pos, compressor->compressor, compressor->level, testMode, std::min(fileSize - pos, (size_t)1 << testBlockLog), &blockCompSize, &blockEncTime, &blockDecTime, mtx);
 
-        mtx->lock();
-        compressor->processedData += filesystem::file_size(fileList->at(thisFile));
-        compressor->compressedSize += compressedSize;
-        compressor->totalCTime += compressTime;
-        compressor->totalDTime += decompressTime;
-
-        for (auto i = compressorsToRun->begin(); i <= compressor; i++) {
-            cout << std::fixed << std::setprecision(2) << "\n| " << i->compressor << " " << availableCompressors[i->compressor].version << " -" << i->level << " | "
-                << i->processedData / (i->totalCTime / 1e9) / 1024 / 1024 << "MiB/s | "
-                << i->processedData / (i->totalDTime / 1e9) / 1024 / 1024 << "MiB/s | "
-                << i->compressedSize << " | " << (double)i->compressedSize / i->processedData * 100 << " |";
+            compressedSize += blockCompSize;
+            compressTime += blockEncTime;
+            decompressTime += blockDecTime;
         }
-        mtx->unlock();
+
+        if (testMode != TEST_FUZZER) {
+            mtx->lock();
+            compressor->processedData += fileSize;
+            compressor->compressedSize += compressedSize;
+            compressor->totalCTime += compressTime;
+            compressor->totalDTime += decompressTime;
+
+            for (auto i = compressorsToRun->begin(); i <= compressor; i++) {
+                std::cout << std::fixed << std::setprecision(2) << "\n| " << i->compressor << " " << availableCompressors[i->compressor].version << " -" << i->level << " | "
+                    << i->processedData / (i->totalCTime / 1e9) / 1024 / 1024 << "MiB/s | "
+                    << i->processedData / (i->totalDTime / 1e9) / 1024 / 1024 << "MiB/s | "
+                    << i->compressedSize << " | " << (double)i->compressedSize / i->processedData * 100 << " |";
+            }
+            mtx->unlock();
+        }
     }
 }
 
@@ -406,51 +528,65 @@ void parse_compressor_string(string text, vector<CompressorResults>* compressors
 int main()
 {
     string path;
-    cout << "Path: ";
+    std::cout << "Path: ";
     std::getline(std::cin, path);
     string compressorText;
-    cout << "Compressors: ";
+    std::cout << "Compressors: ";
     std::getline(std::cin, compressorText);
-    bool multithread;
-    cout << "Multithread: ";
-    cin >> multithread;
+    int testMode;
+    std::cout << "Test mode (0 - Time, 1 - Multithread, 2 - Fuzzer): ";
+    std::cin >> testMode;
+    size_t testBlockLog;
+    std::cout << "Block log: ";
+    std::cin >> testBlockLog;
+
+    if (testMode == TEST_TIME)
+        SET_REALTIME_PRIO;
 
     vector<CompressorResults> compressorsToRun;
     parse_compressor_string(compressorText, &compressorsToRun);
-    int testTimeMode;
 
     vector<string> fileList;
-    if (!filesystem::is_directory(path)) {
-        multithread = false;
-        testTimeMode = TEST_TIME_LONG;
+    if (!filesystem::is_directory(path)) 
         fileList.push_back(path);
-    }
     else {
-        testTimeMode = multithread ? TEST_TIME_IMMEDIATE : TEST_TIME_SHORT;
-        for (auto entry : filesystem::recursive_directory_iterator(path)) {
-            if (!entry.is_directory() && entry.file_size() != 0)
+        try {
+            for (auto entry : filesystem::recursive_directory_iterator(path)) {
+                if (!entry.is_regular_file() || entry.file_size() == 0)
+                    continue;
                 fileList.push_back(entry.path().string());
+            }
+        }
+        catch (std::filesystem::filesystem_error& e) {
+            std::cout << "\n" << e.what();
+            return -1;
+        }
+        catch (std::system_error& e) {
+            std::cout << "\n" << e.what();
+            return -1;
         }
     }
 
-    if (!multithread)
-        SET_REALTIME_PRIO;
-
-    for (auto compressorsIt = compressorsToRun.begin(); compressorsIt != compressorsToRun.end(); compressorsIt++) {
-        int concurrency = multithread ? thread::hardware_concurrency() / 2 : 1;
-        thread* cpu = new thread[concurrency];
-
+    for (auto compressorsIt = compressorsToRun.begin(); compressorsIt != compressorsToRun.end(); compressorsIt++) 
+    {
         size_t fileIt = 0;
         mutex mtx;
-        for (int i = 0; i < concurrency; i++)
-            cpu[i] = thread(benchmark_thread, &fileList, &fileIt, &compressorsToRun, compressorsIt, testTimeMode, &mtx);
-        for (int i = 0; i < concurrency; i++)
-            cpu[i].join();
-        delete[] cpu;
+        if (testMode == TEST_MULTITHREAD) {
+            int concurrency = thread::hardware_concurrency() / 2 - 2;
+            thread* cpu = new thread[concurrency];
+            for (int i = 0; i < concurrency; i++)
+                cpu[i] = thread(benchmark_thread, &fileList, &fileIt, &compressorsToRun, compressorsIt, testMode, testBlockLog, &mtx);
+            for (int i = 0; i < concurrency; i++)
+                cpu[i].join();
+            delete[] cpu;
+        }
+        else {
+            benchmark_thread(&fileList, &fileIt, &compressorsToRun, compressorsIt, testMode, testBlockLog, &mtx);
+        }
     }
 
-    cout << "\n\nFinished";
-    cin >> path;
+    std::cout << "\n\nFinished";
+    std::cin >> path;
 
     return 0;
 }
