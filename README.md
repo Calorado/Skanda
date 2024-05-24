@@ -17,13 +17,13 @@ The API is very simple and straightforward. To compress you might do something l
 ```cpp
 uint8_t* outputBuf = new uint8_t[skanda::compress_bound(inputSize)];
 size_t compressedSize = skanda::compress(inputBuf, inputSize, outputBuf);
-if (compressedSize == -1)
+if (skanda::is_error(compressedSize))
   std::cout << "Error while compressing data";
 ```
 And to decompress:
 ```cpp
-int res = skanda::decompress(compressedBuf, compressedSize, decompressedBuf, uncompressedSize);
-if (res == -1)
+size_t err = skanda::decompress(compressedBuf, compressedSize, decompressedBuf, uncompressedSize);
+if (skanda::is_error(err))
   std::cout << "Error while decompressing data";
 ```
 
@@ -56,37 +56,31 @@ The algorithm was benchmarked on Windows 11, on a Ryzen 6900HX@3.3GHz and compil
 
 | Compressor name         | Compression| Decompress.| Compr. size | Ratio |
 | ---------------         | -----------| -----------| ----------- | ----- | 
-| **skanda 0.8 -speed-bias=1 -0** | 533.16MiB/s | 2656.77MiB/s | 94135957 | 44.41 |
-| **skanda 0.8 -speed-bias=1 -3** | 100.73MiB/s | 2451.41MiB/s | 78139070 | 36.87 |
-| **skanda 0.8 -speed-bias=1 -6** | 14.42MiB/s | 2597.87MiB/s | 71423098 | 33.70 |
-| **skanda 0.8 -speed-bias=1 -9** | 3.01MiB/s | 3038.08MiB/s | 67760675 | 31.97 |
-| **skanda 0.8 -speed-bias=0.5 -0** | 405.20MiB/s | 1883.58MiB/s | 80246607 | 37.86 |
-| **skanda 0.8 -speed-bias=0.5 -3** | 96.89MiB/s | 1936.61MiB/s | 67420657 | 31.81 |
-| **skanda 0.8 -speed-bias=0.5 -6** | 8.57MiB/s | 2086.66MiB/s | 61720628 | 29.12 |
-| **skanda 0.8 -speed-bias=0.5 -9** | 0.64MiB/s | 2094.89MiB/s | 57123123 | 26.95 |
-| **skanda 0.8 -speed-bias=0 -0** | 335.04MiB/s | 1356.30MiB/s | 74659786 | 35.23 |
-| **skanda 0.8 -speed-bias=0 -3** | 92.94MiB/s | 1407.94MiB/s | 63615902 | 30.01 |
-| **skanda 0.8 -speed-bias=0 -6** | 8.53MiB/s | 1519.94MiB/s | 57811563 | 27.28 |
-| **skanda 0.8 -speed-bias=0 -9** | 0.55MiB/s | 1481.58MiB/s | 52771100 | 24.90 |
-| lz4 1.9.4 -1 | 553.23MiB/s | 3382.70MiB/s | 100880983 | 47.60 |
-| lz4 1.9.4 -2 | 104.09MiB/s | 3009.71MiB/s | 83804013 | 39.54 |
-| lz4 1.9.4 -4 | 69.34MiB/s | 3151.82MiB/s | 79808158 | 37.65 |
-| lz4 1.9.4 -8 | 32.83MiB/s | 3263.93MiB/s | 77957732 | 36.78 |
-| lz4 1.9.4 -12 | 9.68MiB/s | 3336.39MiB/s | 77262872 | 36.45 |
-| lizard 1.0 -20 | 330.36MiB/s | 2049.21MiB/s | 96927491 | 45.73 |
-| lizard 1.0 -23 | 50.10MiB/s | 2093.62MiB/s | 82079451 | 38.73 |
-| lizard 1.0 -26 | 5.04MiB/s | 2147.43MiB/s | 72564738 | 34.24 |
-| lizard 1.0 -29 | 1.64MiB/s | 2069.80MiB/s | 68942591 | 32.53 |
-| lizard 1.0 -40 | 235.59MiB/s | 1103.63MiB/s | 80847695 | 38.14 |
-| lizard 1.0 -43 | 46.60MiB/s | 1325.95MiB/s | 71816638 | 33.88 |
-| lizard 1.0 -46 | 7.70MiB/s | 1313.61MiB/s | 65572024 | 30.94 |
-| lizard 1.0 -49 | 1.39MiB/s | 1367.12MiB/s | 60859056 | 28.71 |
-| libdeflate 1.18 -1 | 193.71MiB/s | 741.68MiB/s | 73505591 | 34.68 |
-| libdeflate 1.18 -4 | 109.05MiB/s | 780.81MiB/s | 69471403 | 32.78 |
-| libdeflate 1.18 -8 | 30.72MiB/s | 780.20MiB/s | 66765105 | 31.50 |
-| libdeflate 1.18 -12 | 4.82MiB/s | 789.02MiB/s | 64678485 | 30.52 |
-| zstd 1.5.5 -1 | 360.13MiB/s | 861.60MiB/s | 73423309 | 34.64 |
-| zstd 1.5.5 -6 | 74.28MiB/s | 796.59MiB/s | 61543204 | 29.04 |
-| zstd 1.5.5 -12 | 19.94MiB/s | 812.60MiB/s | 58211131 | 27.46 |
-| zstd 1.5.5 -17 | 4.09MiB/s | 757.63MiB/s | 54284479 | 25.61 |
-| zstd 1.5.5 -22 | 1.69MiB/s | 724.07MiB/s | 52473367 | 24.76 |
+| **skanda 0.9 -speed=1 -0** | 539.88MiB/s | 3114.32MiB/s | 93538228 | 44.13 |
+| **skanda 0.9 -speed=1 -2** | 193.47MiB/s | 2640.16MiB/s | 80049550 | 37.77 |
+| **skanda 0.9 -speed=1 -5** | 26.59MiB/s | 2864.41MiB/s | 72495740 | 34.20 |
+| **skanda 0.9 -speed=1 -7** | 5.36MiB/s | 2972.98MiB/s | 68823978 | 32.47 |
+| **skanda 0.9 -speed=1 -9** | 2.94MiB/s | 2998.12MiB/s | 67729324 | 31.96 |
+| **skanda 0.9 -speed=0.5 -0** | 457.00MiB/s | 1853.22MiB/s | 79301574 | 37.42 |
+| **skanda 0.9 -speed=0.5 -2** | 184.42MiB/s | 1809.57MiB/s | 68352128 | 32.25 |
+| **skanda 0.9 -speed=0.5 -5** | 13.22MiB/s | 1921.22MiB/s | 62695404 | 29.58 |
+| **skanda 0.9 -speed=0.5 -7** | 2.88MiB/s | 2034.08MiB/s | 58205631 | 27.46 |
+| **skanda 0.9 -speed=0.5 -9** | 1.47MiB/s | 2036.71MiB/s | 57089458 | 26.94 |
+| **skanda 0.9 -speed=0 -0** | 402.50MiB/s | 1348.53MiB/s | 73494683 | 34.68 |
+| **skanda 0.9 -speed=0 -2** | 178.53MiB/s | 1331.73MiB/s | 64429195 | 30.40 |
+| **skanda 0.9 -speed=0 -5** | 15.64MiB/s | 1411.07MiB/s | 58037106 | 27.38 |
+| **skanda 0.9 -speed=0 -7** | 2.49MiB/s | 1419.57MiB/s | 53558506 | 25.27 |
+| **skanda 0.9 -speed=0 -9** | 1.27MiB/s | 1409.58MiB/s | 52102474 | 24.58 |
+| lz4 1.9.4 | 551.14MiB/s | 3113.20MiB/s | 100880983 | 47.60 |
+| lz4hc 1.9.4 -1 | 102.44MiB/s | 2780.29MiB/s | 83804013 | 39.54 |
+| lz4hc 1.9.4 -4 | 67.45MiB/s | 2892.35MiB/s | 79808158 | 37.65 |
+| lz4hc 1.9.4 -8 | 29.39MiB/s | 2981.40MiB/s | 77957732 | 36.78 |
+| lz4hc 1.9.4 -12 | 9.46MiB/s | 3063.99MiB/s | 77262872 | 36.45 |
+| zstd 1.5.6 -1 | 365.46MiB/s | 812.80MiB/s | 73423309 | 34.64 |
+| zstd 1.5.6 -3 | 200.14MiB/s | 724.92MiB/s | 66524095 | 31.39 |
+| zstd 1.5.6 -6 | 75.77MiB/s | 765.67MiB/s | 61543204 | 29.04 |
+| zstd 1.5.6 -10 | 31.49MiB/s | 797.64MiB/s | 58680128 | 27.69 |
+| zstd 1.5.6 -15 | 7.06MiB/s | 834.98MiB/s | 57177019 | 26.98 |
+| zstd 1.5.6 -19 | 2.11MiB/s | 715.91MiB/s | 52996635 | 25.00 |
+| zstd 1.5.6 -22 | 1.56MiB/s | 704.20MiB/s | 52473367 | 24.76 |
+
