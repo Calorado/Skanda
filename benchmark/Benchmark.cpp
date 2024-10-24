@@ -1,11 +1,32 @@
-// Public domain 
-// Carlos de Diego 2023
+/*
+MIT License
+
+Copyright (c) 2023-2024 Carlos de Diego
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
 
 #if defined(_MSC_VER)
 #define VC_EXTRALEAN
 #define WIN32_LEAN_AND_MEAN
-#define SET_REALTIME_PRIO SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS)
 #include <Windows.h>
+#define SET_REALTIME_PRIO SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS)
 #undef min
 #undef max
 #else
@@ -13,6 +34,9 @@
 #include <sys/resource.h>
 #define SET_REALTIME_PRIO setpriority(PRIO_PROCESS, 0, -20)
 #endif
+
+#include "lib/threadpool/threadpool.h"
+#include "memorypool.h"
 
 #include <fstream>
 #include <string>
@@ -28,33 +52,82 @@
 #include <cmath>
 #include <random>
 #include <atomic>
+#include <future>
+#include <new>
 
 using namespace std;
+
+mempool::VariableMemoryPool memoryPool(1024, 65536);
+dp::thread_pool globalThreadPool(16);
 
 size_t compress_bound(size_t inSize) {
     return inSize + inSize / 16 + 1024;
 }
 
 #define NO_SPECTRUM
-//#define NO_STRIDER
+#define NO_STRIDER
 //#define NO_SKANDA
-//#define NO_LZ4
+#define NO_LZ4
 #define NO_LIZARD
-//#define NO_ZSTD
-//#define NO_LIBDEFLATE
-//#define NO_LZMA
-//#define NO_LZHAM
-//#define NO_LZAV
+#define NO_ZSTD
+#define NO_LIBDEFLATE
+#define NO_LZMA
+#define NO_LZHAM
+#define NO_LZAV
 
 #ifndef NO_SKANDA
+
 #define SKANDA_IMPLEMENTATION
 #include "Skanda.h"
+
+class SkandaAllocatorCallback : public skanda::AllocatorCallback {
+public:
+    size_t ptrCount = 0; //To test possible memory leaks
+    void* allocate(size_t size) {
+        void* ptr = memoryPool.allocate(size);
+        ptrCount++;
+        return ptr;
+    }
+    void free(void* ptr) {
+        if (ptr)
+            ptrCount--;
+        memoryPool.free(ptr);
+    }
+};
+
+class SkandaThreadPoolCallback : public skanda::ThreadCallback {
+public:
+    std::future<size_t> enqueue(size_t(*func)(void*), void* arg) {
+        return globalThreadPool.enqueue(func, arg);
+    }
+};
+
+class SkandaProgressCallback : public skanda::ProgressCallback {
+public:
+    bool progress(size_t processedBytes, size_t compressedSize) {
+        std::cout << "\nProcessed: " << processedBytes;
+        std::cout << "\nCompressed: " << compressedSize;
+        //Test stoping
+        //if (compressedSize > 10'000'000)
+        //    return true;
+        return false;
+    }
+};
+
 size_t skanda_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
-    return skanda::compress(in, inSize, out, level % 10, (float)(level / 10) / 100);
+    SkandaProgressCallback progressCallback;
+    SkandaAllocatorCallback allocatorCallback;
+    size_t size = skanda::compress(in, inSize, out, level % 10, (float)(level / 10) / 100);
+    return size;
 }
+
 int skanda_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSize) {
+    SkandaProgressCallback progressCallback;
+    SkandaThreadPoolCallback threadPoolCallback;
+    SkandaAllocatorCallback allocatorCallback;
     return skanda::decompress(com, comSize, dec, decSize);
 }
+
 #endif
 
 #ifndef NO_STRIDER
@@ -70,12 +143,30 @@ int strider_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSiz
 
 #ifndef NO_SPECTRUM
 #define SPECTRUM_IMPLEMENTATION
+
 #include "Spectrum.h"
+
+class SpectrumThreadPoolCallback : public spectrum::ThreadPoolCallback {
+    dp::thread_pool<>* threadPoolPtr;
+public:
+    SpectrumThreadPoolCallback(dp::thread_pool<>* _threadPoolPtr) {
+        threadPoolPtr = _threadPoolPtr;
+    }
+    std::future<size_t> enqueue(size_t(*func)(void*), void* arg) {
+        return threadPoolPtr->enqueue(func, arg);
+    }
+};
+
 size_t spectrum_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
-    return spectrum::encode(in, inSize, out);
+    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, false, false, 512, 256, false, false };
+    spectrum::EncoderOptions spectrumOptionsB = { nullptr, 16384, false, false, 512, 256, true, false };
+    SpectrumThreadPoolCallback spectrumThreadPool(&globalThreadPool);
+    return spectrum::encode(in, inSize, out, level ? spectrumOptionsB : spectrumOptionsA);
 }
+
 int spectrum_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSize) {
-    return spectrum::decode(com, comSize, dec, decSize);
+    SpectrumThreadPoolCallback threadPoolCallback(&globalThreadPool);
+    return spectrum::decode(com, comSize, dec, decSize, &threadPoolCallback);
 }
 #endif
 
@@ -88,13 +179,14 @@ size_t spectrum_skanda_backend(const uint8_t* data, const size_t size) {
     catch (std::bad_alloc& e) {
         return 0;
     }
-    size_t compressed = skanda::compress(data, size, out, 2);
+    size_t compressed = skanda::compress(data, size, out, 2, 0);
     delete[] out;
     return compressed;
 }
 size_t spectrum_skanda_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
-    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, 512, 256, false, true };
-    spectrum::EncoderOptions spectrumOptionsB = { &spectrum_skanda_backend, 16384, 512, 256, true, true };
+    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, false, false, 640 + 128, 256, false, true, 2 };
+    spectrum::EncoderOptions spectrumOptionsB = { &spectrum_skanda_backend, 16384, false, false, 640, 256, true, true, 2 };
+    SpectrumThreadPoolCallback spectrumThreadPool(&globalThreadPool);
 
     uint8_t* spectrumOut = new uint8_t[spectrum::encode_bound(inSize)];
     size_t spectrumSize = spectrum::encode(in, inSize, spectrumOut, level % 10 >= 5 ? spectrumOptionsB : spectrumOptionsA);
@@ -116,16 +208,21 @@ size_t spectrum_skanda_compress(uint8_t* in, size_t inSize, uint8_t* out, int le
 int spectrum_skanda_decompress(uint8_t* com, size_t comSize, uint8_t* dec, size_t decSize) {
     size_t spectrumSize;
     memcpy(&spectrumSize, com, sizeof(size_t));
+    
+    SkandaThreadPoolCallback skandaThreadPool;
+    SpectrumThreadPoolCallback spectrumThreadPool(&globalThreadPool);
 
     if (spectrumSize == 0) {
-        if (skanda::decompress(com + sizeof(size_t), comSize - sizeof(size_t), dec, decSize))
+        if (skanda::decompress(com + sizeof(size_t), comSize - sizeof(size_t), dec, decSize, &skandaThreadPool))
             return -1;
     }
     else {
         uint8_t* spectrumOut = new uint8_t[spectrumSize];
-        if (skanda::decompress(com + sizeof(size_t), comSize - sizeof(size_t), spectrumOut, spectrumSize))
+        size_t error = skanda::decompress(com + sizeof(size_t), comSize - sizeof(size_t), spectrumOut, spectrumSize, &skandaThreadPool);
+        if (error) 
             return -1;
-        if (spectrum::decode(spectrumOut, spectrumSize, dec, decSize))
+        error = spectrum::decode(spectrumOut, spectrumSize, dec, decSize, &spectrumThreadPool);
+        if (error)
             return -1;
         delete[] spectrumOut;
     }
@@ -147,10 +244,11 @@ size_t spectrum_strider_backend(const uint8_t* data, const size_t size) {
     return compressed;
 }
 size_t spectrum_strider_compress(uint8_t* in, size_t inSize, uint8_t* out, int level) {
-    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, 1024, 256, false };
-    spectrum::EncoderOptions spectrumOptionsB = { &spectrum_strider_backend, 16384, 512, 256, true };
+    spectrum::EncoderOptions spectrumOptionsA = { nullptr, 16384, false, false, 1024, 256, false };
+    spectrum::EncoderOptions spectrumOptionsB = { &spectrum_strider_backend, 16384, false, false, 512, 256, true };
+    SpectrumThreadPoolCallback spectrumThreadPool(&globalThreadPool);
     uint8_t* spectrumOut = new uint8_t[spectrum::encode_bound(inSize)];
-    size_t spectrumSize = spectrum::encode(in, inSize, spectrumOut, level >= 5 ? spectrumOptionsB : spectrumOptionsA);
+    size_t spectrumSize = spectrum::encode(in, inSize, spectrumOut, level >= 5 ? spectrumOptionsB : spectrumOptionsA, &spectrumThreadPool);
     memcpy(out, &spectrumSize, sizeof(size_t));
     size_t striderSize = strider::compress(spectrumOut, spectrumSize, out + 8, level);
     delete[] spectrumOut;
@@ -295,7 +393,7 @@ struct Compressor {
 
 unordered_map<string, Compressor> availableCompressors = {
 #ifndef NO_SKANDA
-	{ "skanda", { "0.9", &skanda_compress, &skanda_decompress } },
+	{ "skanda", { "1.0", &skanda_compress, &skanda_decompress } },
 #endif
 #ifndef NO_STRIDER
 	{ "strider", { "0.5", &strider_compress, &strider_decompress } },
@@ -304,13 +402,13 @@ unordered_map<string, Compressor> availableCompressors = {
 	{ "spectrum", { "0.2", &spectrum_compress, &spectrum_decompress } },
 #endif
 #if !defined(NO_SKANDA) && !defined(NO_SPECTRUM)
-    { "spectrum_skanda", { "0.9/0.2", &spectrum_skanda_compress, &spectrum_skanda_decompress } },
+    { "spectrum_skanda", { "1.0/0.2", &spectrum_skanda_compress, &spectrum_skanda_decompress } },
 #endif
 #if !defined(NO_STRIDER) && !defined(NO_SPECTRUM)
 	{ "spectrum_strider", { "0.5/0.2", &spectrum_strider_compress, &spectrum_strider_decompress } },
 #endif
 #ifndef NO_LZ4
-	{ "lz4", { "1.9.4", &lz4_compress, &lz4_decompress } },
+	{ "lz4", { "1.10.0", &lz4_compress, &lz4_decompress } },
 #endif
 #ifndef NO_LIZARD
 	{ "lizard", { "1.0", &lizard_compress, &lizard_decompress } },
@@ -328,7 +426,7 @@ unordered_map<string, Compressor> availableCompressors = {
 	{ "lzham", { "1.0", &lzham_compress, &lzham_decompress } },
 #endif
 #ifndef NO_LZAV
-    { "lzav", { "4.0", &lzav_compress, &lzav_decode } },
+    { "lzav", { "4.1", &lzav_compress, &lzav_decode } },
 #endif
 };
 
@@ -345,7 +443,7 @@ uint64_t generate_random_number() {
     return dist(e);
 }
 
-void test_file(string path, size_t off, string compressorName, int level, int testMode, size_t blockSize, 
+void test_file(string path, uint64_t off, string compressorName, int level, int testMode, size_t blockSize, 
     size_t* compressedSize, double* compressTime, double* decompressTime, mutex* mtx) 
 {
     fstream in(path, fstream::in | fstream::binary);
@@ -357,13 +455,10 @@ void test_file(string path, size_t off, string compressorName, int level, int te
     in.seekg(off);
     uint8_t* data = new uint8_t[blockSize];
     in.read((char*)data, blockSize);
-    in.close();
 
     uint8_t* compressed = new uint8_t[compress_bound(blockSize)];
-    uint8_t* decompressed = new uint8_t[blockSize];
     //Have the buffers be physically allocated
     memset(compressed, 0, compress_bound(blockSize));
-    memset(decompressed, 0, blockSize);
 
     auto compressor = availableCompressors.find(compressorName);
     if (compressor == availableCompressors.end()) {
@@ -374,7 +469,7 @@ void test_file(string path, size_t off, string compressorName, int level, int te
 
     double maxTimeSinceBestTime = 0;
     if (testMode == TEST_TIME)
-        maxTimeSinceBestTime = std::max((double)blockSize * 25, 5e4);  //Give 1 second for every 40MB of file and at least 50 microseconds
+        maxTimeSinceBestTime = std::max((double)blockSize * 25, 5e4);  //Give 1 second for every 20MB of file and at least 50 microseconds
 
     double timeSinceBestTime = 0;
     *compressTime = 1e100;
@@ -395,6 +490,12 @@ void test_file(string path, size_t off, string compressorName, int level, int te
     } while (true);
 
     if (testMode == TEST_FUZZER) {
+        //The original compressed buffer is bigger than usually needed, which might cause out of bounds reads to go undetected
+        uint8_t* tmp = new uint8_t[*compressedSize];
+        memcpy(tmp, compressed, *compressedSize);
+        delete[] compressed;
+        compressed = tmp;
+
         uint64_t seed = generate_random_number();
         std::cout << "\nTesting file: " << path << " Algo: " << compressorName + "," + to_string(level) + " Offset: " << off << " Length: " << blockSize << " Seed: " << seed;
         //Introduce errors
@@ -404,6 +505,11 @@ void test_file(string path, size_t off, string compressorName, int level, int te
             compressed[seed % *compressedSize] = seed % 256;
         }
     }
+
+    delete[] data;
+    uint8_t* decompressed = new uint8_t[blockSize];
+    //Have the buffers be physically allocated
+    memset(decompressed, 0, blockSize);
 
     timeSinceBestTime = 0;
     int decError = 0;
@@ -424,16 +530,21 @@ void test_file(string path, size_t off, string compressorName, int level, int te
             break;
     } while (true);
 
+    delete[] compressed;   
+    data = new uint8_t[blockSize];
+    in.seekg(off);
+    in.read((char*)data, blockSize);
+
     if (testMode != TEST_FUZZER) {
         if (decError || !std::equal(data, data + blockSize, decompressed)) {
             mtx->lock();
             std::cout << "\n Error at file " << path << ", decoder return code: " << decError << ", correct bytes: " << std::mismatch(data, data + blockSize, decompressed).first - data << "\n";
+            system("pause");
             exit(-1);
         }
     }
 
     delete[] data;
-    delete[] compressed;
     delete[] decompressed;
 }
 
@@ -471,7 +582,7 @@ void benchmark_thread(vector<string>* fileList, size_t* fileIt, vector<Compresso
         for (uint64_t pos = 0; pos < fileSize; pos += (1ull << testBlockLog)) {
             size_t blockCompSize;
             double blockEncTime, blockDecTime;
-            test_file(fileList->at(thisFile), pos, compressor->compressor, compressor->level, testMode, std::min(fileSize - pos, (size_t)1 << testBlockLog), &blockCompSize, &blockEncTime, &blockDecTime, mtx);
+            test_file(fileList->at(thisFile), pos, compressor->compressor, compressor->level, testMode, std::min(fileSize - pos, (uint64_t)1 << testBlockLog), &blockCompSize, &blockEncTime, &blockDecTime, mtx);
 
             compressedSize += blockCompSize;
             compressTime += blockEncTime;
@@ -547,24 +658,28 @@ int main()
     parse_compressor_string(compressorText, &compressorsToRun);
 
     vector<string> fileList;
-    if (!filesystem::is_directory(path)) 
-        fileList.push_back(path);
-    else {
-        try {
+    try {
+        if (!filesystem::is_directory(path))
+            fileList.push_back(path);
+        else {
             for (auto entry : filesystem::recursive_directory_iterator(path)) {
                 if (!entry.is_regular_file() || entry.file_size() == 0)
                     continue;
                 fileList.push_back(entry.path().string());
             }
         }
-        catch (std::filesystem::filesystem_error& e) {
-            std::cout << "\n" << e.what();
-            return -1;
-        }
-        catch (std::system_error& e) {
-            std::cout << "\n" << e.what();
-            return -1;
-        }
+    }
+    catch (std::filesystem::filesystem_error& e) {
+        std::cout << "\n" << e.what();
+        return -1;
+    }
+    catch (std::system_error& e) {
+        std::cout << "\n" << e.what();
+        return -1;
+    }
+    catch (...) {
+        std::cout << "\nUnknown error";
+        return -1;
     }
 
     for (auto compressorsIt = compressorsToRun.begin(); compressorsIt != compressorsToRun.end(); compressorsIt++) 
@@ -572,7 +687,9 @@ int main()
         size_t fileIt = 0;
         mutex mtx;
         if (testMode == TEST_MULTITHREAD) {
-            int concurrency = thread::hardware_concurrency() / 2 - 2;
+            int concurrency = thread::hardware_concurrency() / 2;
+            if (concurrency < 1)
+                concurrency = 1;
             thread* cpu = new thread[concurrency];
             for (int i = 0; i < concurrency; i++)
                 cpu[i] = thread(benchmark_thread, &fileList, &fileIt, &compressorsToRun, compressorsIt, testMode, testBlockLog, &mtx);
