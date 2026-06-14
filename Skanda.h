@@ -4099,9 +4099,9 @@ namespace skanda {
 			memset(distanceHist, 0, 256 * sizeof(uint32_t));
 			memset(lengthHist, 0, 256 * sizeof(uint32_t));
 
-			const uint8_t* literalRunStart = input;
 			//Skip first byte
 			input++;
+			const uint8_t* literalRunStart = input;
 
 			while (likely(input < thisBlockEnd)) {
 
